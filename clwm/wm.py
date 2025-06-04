@@ -3,8 +3,8 @@ import random
 from torch import nn
 import torch.nn.functional as F
 from collections import deque
-from flash_attn_block import FlashAttentionBlock
-from utils import MAX_ACT, VOCAB, BINS, unimix_generic
+from .flash_attn_block import FlashAttentionBlock
+from .utils import MAX_ACT, VOCAB, BINS, unimix_generic
 
 
 class Buffer:
