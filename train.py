@@ -5,28 +5,13 @@ import torch.nn.functional as F
 from torch.optim import Adam
 import numpy as np
 from tqdm import tqdm
-from vqvae import H16, W16, K
-from wm import WorldModel, Actor, Critic, Buffer
-from utils import (
-    DEVICE,
-    BINS,
-    frames_to_ids,
-    symlog,
-    build_eval_seq,
-    eval_on_sequences,
-    eval_policy,
-    seed_everything,
-    vqvae,
-    frame_to_ids,
-    split_ce,
-    make_atari,
-    make_atari_vectorized,
-    fisher_diag,
-    twohot,
-    unimix,
-    expected_raw,
-    expected_symlog,
-)
+from clwm.vqvae import H16, W16, K
+from clwm.wm import WorldModel, Actor, Critic, Buffer
+from clwm.utils import DEVICE, BINS, symlog, unimix, twohot, expected_raw, expected_symlog, seed_everything
+from clwm.vq_utils import vqvae, frame_to_ids, frames_to_ids
+from clwm.train_utils import split_ce, fisher_diag
+from clwm.envs import make_atari, make_atari_vectorized
+from clwm.eval_utils import build_eval_seq, eval_on_sequences, eval_policy
 
 seed_everything(1)
 
