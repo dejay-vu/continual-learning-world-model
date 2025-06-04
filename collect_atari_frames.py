@@ -3,7 +3,7 @@
 collect_atari_frames.py
 -----------------------
 Random-policy screenshot dump for every ALE/… Gymnasium ID that ends in '-v5'
-(ignores RAM variants).  Frames are resized to 84×84 and saved in shards of
+(ignores RAM variants).  Frames are resized to 84*84 and saved in shards of
 SHARD=1 000 for later VQ-VAE training.
 
 Run:

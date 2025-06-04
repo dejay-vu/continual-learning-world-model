@@ -74,9 +74,16 @@ class VQVAE(nn.Module):
     def forward(self, x):
         lat = self.enc(x)  # [B,N,D]
         B, N, _ = lat.shape
-        z_q, ids, commit = self.vq(lat.reshape(-1, D_LAT))
+
+        z_q, ids, vq_loss = self.vq(lat.view(-1, D_LAT))
         z_q = z_q.view(B, N, D_LAT)
+
+        # -------- decode & pixel loss -------------
         recon = self.dec(z_q).clamp(0, 1)
-        rec_loss = F.mse_loss(recon, x)
-        loss = rec_loss + commit
-        return recon, loss, rec_loss, ids  # rec_loss for logging
+        rec_loss = F.mse_loss(recon, x)  # or BCE if you prefer
+
+        # -------- total VQVAE loss ---------------
+        loss = rec_loss + vq_loss  # vq_loss already includes commitment
+
+        # -------- logging ------------------------
+        return recon, loss, rec_loss, ids  # keep signature for trainer
