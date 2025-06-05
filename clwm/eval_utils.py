@@ -7,7 +7,15 @@ from .vq_utils import frames_to_ids, vqvae
 
 
 @torch.no_grad()
-def build_eval_seq(wm, actor, env_name: str, *, ctx: int = 32, n_seq: int = 128, num_envs: int = 128):
+def build_eval_seq(
+    wm,
+    actor,
+    env_name: str,
+    *,
+    ctx: int = 32,
+    n_seq: int = 128,
+    num_envs: int = 128,
+):
     envs = make_atari_vectorized(env_name, num_envs=num_envs)
     obs, _ = envs.reset(seed=123)
 
@@ -21,13 +29,19 @@ def build_eval_seq(wm, actor, env_name: str, *, ctx: int = 32, n_seq: int = 128,
         ids_batch = frames_to_ids(obs, vqvae)
         z_batch = wm.tok(torch.tensor(ids_batch, device=DEVICE)).mean(1)
         actions = (
-            torch.distributions.Categorical(actor(z_batch)).sample().cpu().numpy()
+            torch.distributions.Categorical(actor(z_batch))
+            .sample()
+            .cpu()
+            .numpy()
         )
         for e in range(num_envs):
             eps[e].append((ids_batch[e], int(actions[e])))
             if len(eps[e]) >= ctx:
                 seq = torch.stack(
-                    [torch.tensor(np.append(t, ACT_PAD + a_)) for t, a_ in eps[e][-ctx:]]
+                    [
+                        torch.tensor(np.append(t, ACT_PAD + a_))
+                        for t, a_ in eps[e][-ctx:]
+                    ]
                 )
                 seqs.append(seq)
                 if len(seqs) >= n_seq:
@@ -55,7 +69,9 @@ def eval_on_sequences(wm, seq_batch):
 
 
 @torch.no_grad()
-def eval_policy(actor, wm, env_name: str, *, episodes: int = 128, num_envs: int = 128):
+def eval_policy(
+    actor, wm, env_name: str, *, episodes: int = 128, num_envs: int = 128
+):
     envs = make_atari_vectorized(env_name, num_envs=num_envs)
     obs, _ = envs.reset(seed=0)
 
@@ -67,7 +83,10 @@ def eval_policy(actor, wm, env_name: str, *, episodes: int = 128, num_envs: int 
         ids_batch = frames_to_ids(obs, vqvae)
         z_batch = wm.tok(torch.tensor(ids_batch, device=DEVICE)).mean(1)
         actions = (
-            torch.distributions.Categorical(actor(z_batch)).sample().cpu().numpy()
+            torch.distributions.Categorical(actor(z_batch))
+            .sample()
+            .cpu()
+            .numpy()
         )
         obs, r, term, trunc, _ = envs.step(actions)
         ep_scores += symexp(r)

@@ -7,10 +7,15 @@ import numpy as np
 from tqdm import tqdm
 from clwm.vqvae import H16, W16, K
 from clwm.wm import WorldModel, Actor, Critic, Buffer
-from clwm.utils import DEVICE, BINS, symlog, unimix, twohot, expected_raw, expected_symlog, seed_everything
-from clwm.vq_utils import vqvae, frame_to_ids, frames_to_ids
+from clwm.utils import (
+    DEVICE,
+    twohot,
+    expected_symlog,
+    seed_everything,
+)
+from clwm.vq_utils import vqvae, frames_to_ids
 from clwm.train_utils import split_ce, fisher_diag
-from clwm.envs import make_atari, make_atari_vectorized
+from clwm.envs import make_atari_vectorized
 from clwm.eval_utils import build_eval_seq, eval_on_sequences, eval_policy
 
 seed_everything(1)
@@ -388,7 +393,7 @@ eval_task = "Phoenix"
 
 
 if __name__ == "__main__":
-    dim = 128
+    dim = 256
     wm = WorldModel(d=dim, layers=6, heads=8).to(DEVICE)
     actor = Actor(dim).to(DEVICE)
     critic = Critic(dim).to(DEVICE)
@@ -416,15 +421,15 @@ if __name__ == "__main__":
             critic=critic,
             replay=replay,
             epochs=20,
-            ctx=64,
-            collect=32,
+            ctx=128,
+            collect=512,
             running_W=running_W,
             running_F=running_F,
         )
 
         losses.append(loss)
 
-        seq_eval = build_eval_seq(wm, actor, eval_task, ctx=32, n_seq=256)
+        seq_eval = build_eval_seq(wm, actor, eval_task, ctx=512, n_seq=256)
         ce_eval = eval_on_sequences(wm, seq_eval)
         print(f"Eval CE on {eval_task}: {ce_eval:.4f}")
         print(f"Score {eval_task}: {eval_policy(actor, wm, eval_task)}")
