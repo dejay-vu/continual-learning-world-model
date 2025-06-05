@@ -1,8 +1,8 @@
-ale_py==0.11.0
-flash_attn==2.7.4.post1
-gymnasium==1.1.1
-numpy==2.2.6
-safetensors==0.5.3
-torch==2.6.0
-tqdm==4.67.1
-vector_quantize_pytorch==1.22.16
+-c constraints.txt
+ale_py
+flash_attn
+gymnasium
+numpy
+safetensors
+tqdm
+vector_quantize_pytorch
