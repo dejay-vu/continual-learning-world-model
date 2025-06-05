@@ -1,0 +1,34 @@
+Bootstrap: docker
+From: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
+Stage: build
+
+%arguments
+    PROJECT_HOME=/workspace/continual-learning-world-model
+
+%environment
+    export PROJECT_HOME={{PROJECT_HOME}}
+
+%setup
+    mkdir -p ${APPTAINER_ROOTFS}/workspace/continual-learning-world-model
+
+%files
+    ./* {{PROJECT_HOME}}
+
+%post
+    export PROJECT_HOME={{PROJECT_HOME}}
+    apt update -y && apt upgrade -y
+    cd ${PROJECT_HOME}
+    pip install --upgrade pip setuptools wheel
+    pip install -r requirements.txt
+    pip install flash-attn --no-build-isolation
+
+%runscript
+    echo "${DATA} is the data directory"
+    echo "torch version: $(python -c 'import torch; print(torch.__version__)')"
+    echo "flash-attn version: $(python -c 'import flash_attn; print(flash_attn.__version__)')"
+    cd ${PROJECT_HOME}
+    python train.py
+
+%labels
+    Author junhao.zhang@eng.ox.ac.uk
+    Version v0.0.1
