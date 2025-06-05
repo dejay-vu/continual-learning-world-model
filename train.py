@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 import random
 import torch
-import torch.nn.functional as F
 from torch.optim import Adam
 import numpy as np
 from tqdm import tqdm
