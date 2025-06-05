@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from safetensors.torch import load_file
-from .vqvae import VQVAE, RES, D_LAT, K
+from .vqvae import VQVAE, RES, D_LAT
 from .utils import DEVICE, CHECKPOINT
 
 _VQVAE_SINGLETON: VQVAE | None = None
@@ -26,10 +26,14 @@ vqvae = get_vqvae()
 @torch.no_grad()
 def frame_to_ids(frame_u8: np.ndarray, vqvae: VQVAE) -> np.ndarray:
     x = (
-        torch.tensor(frame_u8, dtype=torch.float32, device=DEVICE).permute(2, 0, 1)
+        torch.tensor(frame_u8, dtype=torch.float32, device=DEVICE).permute(
+            2, 0, 1
+        )
         / 255.0
     )
-    x = F.interpolate(x[None], (RES, RES), mode="bilinear", align_corners=False)
+    x = F.interpolate(
+        x[None], (RES, RES), mode="bilinear", align_corners=False
+    )
     _, ids, _ = vqvae.vq(vqvae.enc(x).reshape(-1, D_LAT))
     return ids.squeeze(0).cpu().numpy()
 

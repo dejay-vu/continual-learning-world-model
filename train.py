@@ -1,16 +1,20 @@
 #!/usr/bin/env python
 import random
 import torch
-import torch.nn.functional as F
 from torch.optim import Adam
 import numpy as np
 from tqdm import tqdm
 from clwm.vqvae import H16, W16, K
 from clwm.wm import WorldModel, Actor, Critic, Buffer
-from clwm.utils import DEVICE, BINS, symlog, unimix, twohot, expected_raw, expected_symlog, seed_everything
-from clwm.vq_utils import vqvae, frame_to_ids, frames_to_ids
+from clwm.utils import (
+    DEVICE,
+    twohot,
+    expected_symlog,
+    seed_everything,
+)
+from clwm.vq_utils import vqvae, frames_to_ids
 from clwm.train_utils import split_ce, fisher_diag
-from clwm.envs import make_atari, make_atari_vectorized
+from clwm.envs import make_atari_vectorized
 from clwm.eval_utils import build_eval_seq, eval_on_sequences, eval_policy
 
 seed_everything(1)

@@ -11,14 +11,11 @@ VOCAB = PAD + 1  # embedding size 147
 CHECKPOINT = "vqvae_atari.safetensors"  # path to weights
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
+
 def seed_everything(seed=0):
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
-
-
-
-
 
 
 def symlog(x):
