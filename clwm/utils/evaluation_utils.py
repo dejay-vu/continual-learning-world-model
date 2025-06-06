@@ -2,7 +2,7 @@ import numpy as np
 import torch
 from ..env.atari_envs import make_atari_vectorized_envs
 from .training_utils import split_cross_entropy
-from .common import TORCH_DEVICE, ACTION_ID_START, symexp
+from .common import ACTION_ID_START, TORCH_DEVICE, symexp
 from ..models.vqvae_utils import frames_to_indices, vqvae
 
 
@@ -15,7 +15,8 @@ def build_evaluation_sequences(
     ctx: int = 32,
     n_seq: int = 128,
     num_envs: int = 128,
-):
+) -> list[torch.Tensor]:
+    """Generate context sequences for evaluation."""
     envs = make_atari_vectorized_envs(env_name, num_envs=num_envs)
     obs, _ = envs.reset(seed=123)
 
@@ -56,7 +57,8 @@ def build_evaluation_sequences(
 
 
 @torch.no_grad()
-def evaluate_on_sequences(wm, seq_batch):
+def evaluate_on_sequences(wm, seq_batch: list[torch.Tensor]) -> torch.Tensor:
+    """Return cross-entropy on a batch of evaluation sequences."""
     batch = torch.stack(seq_batch).to(TORCH_DEVICE)
     B = batch.size(0)
     inp = batch[:, :-1].reshape(B, -1)
@@ -71,7 +73,8 @@ def evaluate_on_sequences(wm, seq_batch):
 @torch.no_grad()
 def evaluate_policy(
     actor, wm, env_name: str, *, episodes: int = 128, num_envs: int = 128
-):
+) -> float:
+    """Roll out a policy and report mean score."""
     envs = make_atari_vectorized_envs(env_name, num_envs=num_envs)
     obs, _ = envs.reset(seed=0)
 

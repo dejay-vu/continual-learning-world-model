@@ -50,11 +50,13 @@ VOCAB_SIZE = PAD_TOKEN + 1  # embedding size 147
 def left_pad_sequence(
     seq: torch.Tensor, ctx: int, pad_id: int
 ) -> torch.Tensor:
-    L = seq.size(0)
-    if L >= ctx:
+    """Left-pad ``seq`` to length ``ctx`` using ``pad_id``."""
+
+    length = seq.size(0)
+    if length >= ctx:
         return seq[-ctx:]
     pad = torch.full(
-        (ctx - L, seq.size(1)), pad_id, dtype=seq.dtype, device=seq.device
+        (ctx - length, seq.size(1)), pad_id, dtype=seq.dtype, device=seq.device
     )
     return torch.cat((pad, seq), 0)
 
@@ -79,6 +81,7 @@ def train_on_task(
     running_weights=None,
     running_fisher=None,
 ):
+    """Train world model and actor/critic on one game."""
     opt_wm = Adam(wm.parameters(), 1e-4)
     opt_act = Adam(actor.parameters(), 4e-4)
     opt_cri = Adam(critic.parameters(), 4e-4)

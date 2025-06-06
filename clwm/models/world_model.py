@@ -1,25 +1,33 @@
 import math
 import random
+from collections import deque
+from typing import Iterable, Tuple
+
+import torch
 from torch import nn
 import torch.nn.functional as F
-from collections import deque
+
 from .flash_attention import FlashAttentionBlock
 from ..utils.common import MAX_ACTIONS, VOCAB_SIZE, REWARD_BINS, unimix_generic
 
 
 class ReplayBuffer:
-    def __init__(self, cap):
-        self.b = deque(maxlen=cap)
+    """Simple FIFO replay buffer."""
 
-    def add(self, seq, reward: float):
+    def __init__(self, cap: int) -> None:
+        self.b: deque[Tuple[torch.Tensor, float]] = deque(maxlen=cap)
+
+    def add(self, seq: torch.Tensor, reward: float) -> None:
         self.b.append((seq, reward))
 
-    def sample(self, k):
+    def sample(self, k: int) -> Iterable[Tuple[torch.Tensor, float]]:
         return random.sample(self.b, min(k, len(self.b)))
 
 
 class WorldModel(nn.Module):
-    def __init__(self, d=256, layers=6, heads=8):
+    """Transformer world model predicting tokens and rewards."""
+
+    def __init__(self, d: int = 256, layers: int = 6, heads: int = 8) -> None:
         super().__init__()
         self.tok = nn.Embedding(VOCAB_SIZE, d)
         self.blocks = nn.ModuleList(
@@ -33,11 +41,16 @@ class WorldModel(nn.Module):
         self.reward_head = nn.Linear(d, len(REWARD_BINS), bias=False)
         nn.init.zeros_(self.reward_head.weight)
 
-    def add_task(self):
+    def add_task(self) -> None:
         for b in self.blocks:
             b.add()
 
-    def forward(self, seq, return_ent=False, return_reward=False):
+    def forward(
+        self,
+        seq: torch.Tensor,
+        return_ent: bool = False,
+        return_reward: bool = False,
+    ):
         x = self.tok(seq)
         ent_sum = 0.0
         for b in self.blocks:
@@ -48,7 +61,7 @@ class WorldModel(nn.Module):
 
         h = self.ln(x)
 
-        out_logits = self.head(h)  # [B, L, V]
+        out_logits = self.head(h)
         out = (out_logits,)
 
         if return_ent:
@@ -60,13 +73,15 @@ class WorldModel(nn.Module):
 
 
 class ActorNetwork(nn.Module):
-    def __init__(self, d_lat):
+    """Policy network mapping latent state to action distribution."""
+
+    def __init__(self, d_lat: int) -> None:
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(d_lat, 512), nn.ReLU(), nn.Linear(512, MAX_ACTIONS)
         )
 
-    def forward(self, z, p_unimix: float = 0.01):
+    def forward(self, z: torch.Tensor, p_unimix: float = 0.01) -> torch.Tensor:
         """
         Args
         ----
@@ -86,7 +101,9 @@ class ActorNetwork(nn.Module):
 
 
 class CriticNetwork(nn.Module):
-    def __init__(self, d):
+    """Value network estimating future rewards."""
+
+    def __init__(self, d: int) -> None:
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(d, 512),
@@ -95,5 +112,5 @@ class CriticNetwork(nn.Module):
         )
         nn.init.zeros_(self.net[-1].weight)
 
-    def forward(self, z):
-        return self.net(z)  # (B, |REWARD_BINS|) logits
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        return self.net(z)
