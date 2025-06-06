@@ -83,7 +83,11 @@ def make_atari_vectorized_envs(
     # collection where throughput is not the primary bottleneck.
 
     try:
-        return gym.vector.AsyncVectorEnv(env_fns, shared_memory=False)
+        return gym.vector.AsyncVectorEnv(
+            env_fns,
+            shared_memory=False,
+            observation_mode="different",
+        )
     except PermissionError:
         # Fall back to synchronous vector environment.
-        return gym.vector.SyncVectorEnv(env_fns)
+        return gym.vector.SyncVectorEnv(env_fns, observation_mode="different")
