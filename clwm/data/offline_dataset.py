@@ -1,10 +1,10 @@
 import numpy as np
 import torch
 from pathlib import Path
+import gymnasium as gym
 from stable_baselines3 import PPO
 
-from ..env.atari_envs import make_atari_env, make_atari_vectorized_envs
-from tqdm import tqdm
+from ..env.atari_envs import make_atari_env
 
 
 def gather_offline_dataset(
@@ -15,7 +15,6 @@ def gather_offline_dataset(
     reso: int = 84,
     shard: int = 1000,
     policy: str | None = None,
-    num_envs: int = 1,
 ):
     """Collect frames, actions and rewards to build an offline dataset.
 
@@ -23,28 +22,12 @@ def gather_offline_dataset(
     ``stable-baselines3`` and used to act in the environment; otherwise actions
     are sampled uniformly. The resulting dataset is stored as compressed ``.npz``
     shards compatible with :func:`load_dataset_to_gpu`.
-
-    Parameters
-    ----------
-    num_envs:
-        Number of environment instances to run in parallel when collecting the
-        dataset. ``1`` replicates the previous single‑environment behaviour.
     """
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    if num_envs > 1:
-        env = make_atari_vectorized_envs(
-            game,
-            num_envs=num_envs,
-            max_episode_steps=None,
-            render_mode="rgb_array",
-        )
-    else:
-        env = make_atari_env(
-            game, max_episode_steps=None, render_mode="rgb_array"
-        )
+    env = make_atari_env(game, max_episode_steps=None, render_mode="rgb_array")
     obs, _ = env.reset()
 
     agent = PPO.load(policy, env=env) if policy is not None else None
@@ -55,50 +38,28 @@ def gather_offline_dataset(
     dones_buffer: list[bool] = []
     shard_idx = 0
 
-    pbar = tqdm(total=steps, desc=game)
-    collected = 0
-    while collected < steps:
-        frame = env.render()
-        if num_envs == 1:
-            frame = frame.transpose(2, 0, 1)[None]
-        else:
-            frame = frame.transpose(0, 3, 1, 2)
-
-        if frame.shape[2] != reso:
+    for _ in range(steps):
+        frame = env.render().transpose(2, 0, 1) / 255.0
+        if frame.shape[1] != reso:
             frame = torch.nn.functional.interpolate(
-                torch.tensor(frame),
+                torch.tensor(frame)[None],
                 (reso, reso),
                 mode="bilinear",
                 align_corners=False,
-            )
-
+            )[0]
+        frame_np = frame.numpy()
         if agent is None:
             action = env.action_space.sample()
         else:
             action, _ = agent.predict(obs, deterministic=True)
-
         obs, reward, term, trunc, _ = env.step(action)
-        if num_envs == 1:
-            iter_range = [0]
-        else:
-            iter_range = range(num_envs)
 
-        for i in iter_range:
-            frames_buffer.append(frame[i].cpu().numpy())
-            actions_buffer.append(int(action[i] if num_envs > 1 else action))
-            rewards_buffer.append(float(reward[i] if num_envs > 1 else reward))
-            done_i = (
-                bool(term[i] or trunc[i])
-                if num_envs > 1
-                else bool(term or trunc)
-            )
-            dones_buffer.append(done_i)
-            collected += 1
-            pbar.update(1)
-            if collected >= steps:
-                break
+        frames_buffer.append(frame_np)
+        actions_buffer.append(int(action))
+        rewards_buffer.append(float(reward))
+        dones_buffer.append(bool(term or trunc))
 
-        if len(frames_buffer) >= shard:
+        if len(frames_buffer) == shard:
             np.savez_compressed(
                 out / f"{shard_idx:04d}.npz",
                 frames=np.stack(frames_buffer),
@@ -112,12 +73,8 @@ def gather_offline_dataset(
             dones_buffer.clear()
             shard_idx += 1
 
-        if num_envs > 1:
-            env.reset_done()
-        elif term or trunc:
+        if term or trunc:
             obs, _ = env.reset()
-
-    pbar.close()
 
     if frames_buffer:
         np.savez_compressed(
@@ -130,6 +87,88 @@ def gather_offline_dataset(
 
     env.close()
     print("✓ Dataset collected")
+
+
+def gather_datasets_parallel(
+    games: list[str],
+    steps: int,
+    base_dir: str,
+    *,
+    reso: int = 84,
+    shard: int = 1000,
+):
+    """Collect datasets for multiple games in parallel using vectorized envs."""
+
+    envs = make_atari_vectorized_envs(
+        games,
+        max_episode_steps=None,
+        render_mode="rgb_array",
+    )
+    obs, _ = envs.reset()
+
+    out_dirs = [Path(base_dir) / g for g in games]
+    for p in out_dirs:
+        p.mkdir(parents=True, exist_ok=True)
+
+    buffers = [
+        dict(frames=[], actions=[], rewards=[], dones=[], idx=0, count=0)
+        for _ in games
+    ]
+
+    pbar = tqdm(total=steps * len(games), desc="collect")
+    while any(b["count"] < steps for b in buffers):
+        frame = envs.render().transpose(0, 3, 1, 2)
+        if frame.shape[2] != reso:
+            frame = torch.nn.functional.interpolate(
+                torch.tensor(frame),
+                (reso, reso),
+                mode="bilinear",
+                align_corners=False,
+            ).numpy()
+
+        actions = [envs.single_action_space.sample() for _ in games]
+        obs, reward, term, trunc, _ = envs.step(actions)
+        done = np.logical_or(term, trunc)
+
+        for i, buf in enumerate(buffers):
+            if buf["count"] >= steps:
+                continue
+            buf["frames"].append(frame[i])
+            buf["actions"].append(int(actions[i]))
+            buf["rewards"].append(float(reward[i]))
+            buf["dones"].append(bool(done[i]))
+            buf["count"] += 1
+            pbar.update(1)
+            if len(buf["frames"]) >= shard:
+                np.savez_compressed(
+                    out_dirs[i] / f"{buf['idx']:04d}.npz",
+                    frames=np.stack(buf["frames"]),
+                    actions=np.array(buf["actions"], dtype=np.int16),
+                    rewards=np.array(buf["rewards"], dtype=np.float32),
+                    dones=np.array(buf["dones"], dtype=np.bool_),
+                )
+                buf["frames"].clear()
+                buf["actions"].clear()
+                buf["rewards"].clear()
+                buf["dones"].clear()
+                buf["idx"] += 1
+
+        envs.reset_done()
+
+    pbar.close()
+
+    for buf, out_p in zip(buffers, out_dirs):
+        if buf["frames"]:
+            np.savez_compressed(
+                out_p / f"{buf['idx']:04d}.npz",
+                frames=np.stack(buf["frames"]),
+                actions=np.array(buf["actions"], dtype=np.int16),
+                rewards=np.array(buf["rewards"], dtype=np.float32),
+                dones=np.array(buf["dones"], dtype=np.bool_),
+            )
+
+    envs.close()
+    print("✓ Datasets collected")
 
 
 from ..utils.common import TORCH_DEVICE, ACTION_ID_START, PAD_TOKEN
@@ -157,31 +196,10 @@ def read_npz_dataset(folder: str):
 
 
 @torch.no_grad()
-def load_dataset_to_gpu(folder: str, *, batch_size: int = 2048):
-    """Load dataset and convert all arrays to GPU tensors.
-
-    Parameters
-    ----------
-    folder:
-        Path to the directory containing ``.npz`` shards.
-    batch_size:
-        Number of frames processed at once when converting them to VQ-VAE
-        indices. Reducing this value lowers peak GPU memory usage.
-    """
+def load_dataset_to_gpu(folder: str):
+    """Load dataset and convert all arrays to GPU tensors."""
     frames, actions, rewards, dones = read_npz_dataset(folder)
-
-    # Datasets collected with ``gather_offline_dataset`` store frames in
-    # ``(C, H, W)`` order, whereas :func:`frames_to_indices` expects the
-    # channel dimension last. Convert the layout if necessary to avoid
-    # shape mismatches when passing the frames through the VQ-VAE encoder.
-    if (
-        frames.ndim == 4
-        and frames.shape[-1] not in (1, 3)
-        and frames.shape[1] in (1, 3)
-    ):
-        frames = frames.transpose(0, 2, 3, 1)
-
-    ids = frames_to_indices(frames, vqvae, batch_size=batch_size)
+    ids = frames_to_indices(frames, vqvae)
     return (
         torch.tensor(ids, device=TORCH_DEVICE),
         torch.tensor(actions, device=TORCH_DEVICE),

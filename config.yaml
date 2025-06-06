@@ -16,7 +16,6 @@ dataset:
   shard: 1000
   # Number of frames processed at once when converting to VQ-VAE indices
   load_bs: 8192
-  num_envs: 8
 tasks:
   train:
     - SpaceInvaders

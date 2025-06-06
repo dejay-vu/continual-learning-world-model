@@ -29,6 +29,7 @@ from clwm.data import (
     load_dataset_to_gpu,
     fill_replay_buffer,
     gather_offline_dataset,
+    gather_datasets_parallel,
 )
 
 set_global_seed(1)
@@ -384,28 +385,20 @@ if __name__ == "__main__":
     seen = set()
     random.shuffle(TASKS)
 
-    # collect missing datasets in parallel ---------------------------------
-    missing = []
-    for game in TASKS:
-        game_dir = Path(base_dir) / game
-        if not list(game_dir.glob("*.npz")):
-            missing.append(game)
+    missing = [
+        game
+        for game in TASKS
+        if not list((Path(base_dir) / game).glob("*.npz"))
+    ]
 
     if missing:
-        import multiprocessing as mp
-
-        def _collect(game_name: str):
-            gather_offline_dataset(
-                game_name,
-                cfg["dataset"]["collect_steps"],
-                str(Path(base_dir) / game_name),
-                reso=cfg["dataset"].get("reso", 84),
-                shard=cfg["dataset"].get("shard", 1000),
-                num_envs=cfg["dataset"].get("num_envs", 1),
-            )
-
-        with mp.get_context("spawn").Pool(len(missing)) as pool:
-            pool.map(_collect, missing)
+        gather_datasets_parallel(
+            missing,
+            cfg["dataset"]["collect_steps"],
+            base_dir,
+            reso=cfg["dataset"].get("reso", 84),
+            shard=cfg["dataset"].get("shard", 1000),
+        )
 
     for idx, game in enumerate(TASKS):
         game_dir = Path(base_dir) / game
