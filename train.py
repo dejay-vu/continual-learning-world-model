@@ -367,15 +367,11 @@ if __name__ == "__main__":
     base_dir = cfg["dataset"]["base_dir"]
 
     dim = cfg["model"]["dim"]
-    wm = (
-        WorldModel(
-            d=dim, layers=cfg["model"]["layers"], heads=cfg["model"]["heads"]
-        )
-        .to(TORCH_DEVICE)
-        .half()
-    )
-    actor = ActorNetwork(dim).to(TORCH_DEVICE).half()
-    critic = CriticNetwork(dim).to(TORCH_DEVICE).half()
+    wm = WorldModel(
+        d=dim, layers=cfg["model"]["layers"], heads=cfg["model"]["heads"]
+    ).to(TORCH_DEVICE)
+    actor = ActorNetwork(dim).to(TORCH_DEVICE)
+    critic = CriticNetwork(dim).to(TORCH_DEVICE)
 
     running_weights = None
     running_fisher = None
@@ -416,7 +412,7 @@ if __name__ == "__main__":
 
         frames_t, actions_t, rewards_t, dones_t = load_dataset_to_gpu(
             str(game_dir),
-            batch_size=cfg["dataset"].get("load_bs", 2048),
+            batch_size=cfg["dataset"].get("load_bs", 4096),
         )
 
         replay = ReplayBuffer(30000)
