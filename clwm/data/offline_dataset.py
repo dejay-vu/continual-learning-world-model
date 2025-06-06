@@ -4,7 +4,8 @@ from pathlib import Path
 import gymnasium as gym
 from stable_baselines3 import PPO
 
-from ..env.atari_envs import make_atari_env
+from ..env.atari_envs import make_atari_env, make_atari_vectorized_envs
+from tqdm import tqdm
 
 
 def gather_offline_dataset(
@@ -15,6 +16,7 @@ def gather_offline_dataset(
     reso: int = 84,
     shard: int = 1000,
     policy: str | None = None,
+    num_envs: int = 1,
 ):
     """Collect frames, actions and rewards to build an offline dataset.
 
@@ -22,12 +24,23 @@ def gather_offline_dataset(
     ``stable-baselines3`` and used to act in the environment; otherwise actions
     are sampled uniformly. The resulting dataset is stored as compressed ``.npz``
     shards compatible with :func:`load_dataset_to_gpu`.
+
+    Parameters
+    ----------
+    num_envs:
+        Number of environment instances to run in parallel when collecting the
+        dataset. ``1`` replicates the previous single‑environment behaviour.
     """
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    env = make_atari_env(game, max_episode_steps=None, render_mode="rgb_array")
+    if num_envs > 1:
+        env = make_atari_vectorized_envs(
+            game, num_envs=num_envs, max_episode_steps=None, render_mode="rgb_array"
+        )
+    else:
+        env = make_atari_env(game, max_episode_steps=None, render_mode="rgb_array")
     obs, _ = env.reset()
 
     agent = PPO.load(policy, env=env) if policy is not None else None
@@ -38,28 +51,46 @@ def gather_offline_dataset(
     dones_buffer: list[bool] = []
     shard_idx = 0
 
-    for _ in range(steps):
-        frame = env.render().transpose(2, 0, 1) / 255.0
-        if frame.shape[1] != reso:
+    pbar = tqdm(total=steps, desc=game)
+    collected = 0
+    while collected < steps:
+        frame = env.render()
+        if num_envs == 1:
+            frame = frame.transpose(2, 0, 1)[None]
+        else:
+            frame = frame.transpose(0, 3, 1, 2)
+
+        if frame.shape[2] != reso:
             frame = torch.nn.functional.interpolate(
-                torch.tensor(frame)[None],
+                torch.tensor(frame),
                 (reso, reso),
                 mode="bilinear",
                 align_corners=False,
-            )[0]
-        frame_np = frame.numpy()
+            )
+
         if agent is None:
             action = env.action_space.sample()
         else:
             action, _ = agent.predict(obs, deterministic=True)
+
         obs, reward, term, trunc, _ = env.step(action)
+        if num_envs == 1:
+            iter_range = [0]
+        else:
+            iter_range = range(num_envs)
 
-        frames_buffer.append(frame_np)
-        actions_buffer.append(int(action))
-        rewards_buffer.append(float(reward))
-        dones_buffer.append(bool(term or trunc))
+        for i in iter_range:
+            frames_buffer.append(frame[i].cpu().numpy())
+            actions_buffer.append(int(action[i] if num_envs > 1 else action))
+            rewards_buffer.append(float(reward[i] if num_envs > 1 else reward))
+            done_i = bool(term[i] or trunc[i]) if num_envs > 1 else bool(term or trunc)
+            dones_buffer.append(done_i)
+            collected += 1
+            pbar.update(1)
+            if collected >= steps:
+                break
 
-        if len(frames_buffer) == shard:
+        if len(frames_buffer) >= shard:
             np.savez_compressed(
                 out / f"{shard_idx:04d}.npz",
                 frames=np.stack(frames_buffer),
@@ -73,8 +104,12 @@ def gather_offline_dataset(
             dones_buffer.clear()
             shard_idx += 1
 
-        if term or trunc:
+        if num_envs > 1:
+            env.reset_done()
+        elif term or trunc:
             obs, _ = env.reset()
+
+    pbar.close()
 
     if frames_buffer:
         np.savez_compressed(
