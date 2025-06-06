@@ -1,7 +1,28 @@
 import torch
 import torch.nn as nn
-from flash_attn.layers.rotary import RotaryEmbedding
-from flash_attn import flash_attn_qkvpacked_func
+
+try:
+    from flash_attn.layers.rotary import RotaryEmbedding
+    from flash_attn import flash_attn_qkvpacked_func
+
+    FLASH_ATTENTION_AVAILABLE = True
+except Exception:  # pragma: no cover - optional dependency may be missing
+    FLASH_ATTENTION_AVAILABLE = False
+
+    class RotaryEmbedding(nn.Module):
+        """Fallback rotary embedding that simply returns the input."""
+
+        def __init__(self, dim: int):  # noqa: D401 - simple placeholder
+            super().__init__()
+            self.dim = dim
+
+        def forward(self, x, *_, **__):  # noqa: D401 - simple placeholder
+            return x
+
+    def flash_attn_qkvpacked_func(*args, **kwargs):  # noqa: D401 - placeholder
+        raise NotImplementedError("flash_attn is not installed")
+
+
 from .lora_layer import LoRA
 
 
@@ -65,7 +86,7 @@ class FlashAttentionBlock(nn.Module):
 
         resid = x
 
-        if x.is_cuda:
+        if FLASH_ATTENTION_AVAILABLE and x.is_cuda:
             # ---- Fast path using flash-attn --------------------------------
             # Compute raw QKV on x (no pre-LN) to match original ordering
             qkv = self.qkv(x)  # (B, L, 3*D)
@@ -94,7 +115,7 @@ class FlashAttentionBlock(nn.Module):
             y = self.o_proj(y)
 
         else:
-            # ---- CPU fallback using scaled-dot-product attention ------------
+            # ---- Fallback using scaled-dot-product attention ----------------
             qkv = self.qkv(x)  # (B, L, 3*D)
             q, k, v = qkv.chunk(3, dim=-1)
 
@@ -108,7 +129,12 @@ class FlashAttentionBlock(nn.Module):
             # memory-friendly than manually materialising the full attention
             # matrix. We leverage it here with causal masking enabled.
             y = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v, attn_mask=None, dropout_p=self.attn_dropout.p if self.training else 0.0, is_causal=True
+                q,
+                k,
+                v,
+                attn_mask=None,
+                dropout_p=self.attn_dropout.p if self.training else 0.0,
+                is_causal=True,
             )  # (B, H, L, D)
             y = y.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
             y = self.o_proj(y)
