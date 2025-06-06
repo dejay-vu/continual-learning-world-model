@@ -1,7 +1,6 @@
 import numpy as np
 import torch
 from pathlib import Path
-import gymnasium as gym
 from stable_baselines3 import PPO
 
 from ..env.atari_envs import make_atari_env, make_atari_vectorized_envs
@@ -37,10 +36,15 @@ def gather_offline_dataset(
 
     if num_envs > 1:
         env = make_atari_vectorized_envs(
-            game, num_envs=num_envs, max_episode_steps=None, render_mode="rgb_array"
+            game,
+            num_envs=num_envs,
+            max_episode_steps=None,
+            render_mode="rgb_array",
         )
     else:
-        env = make_atari_env(game, max_episode_steps=None, render_mode="rgb_array")
+        env = make_atari_env(
+            game, max_episode_steps=None, render_mode="rgb_array"
+        )
     obs, _ = env.reset()
 
     agent = PPO.load(policy, env=env) if policy is not None else None
@@ -83,7 +87,11 @@ def gather_offline_dataset(
             frames_buffer.append(frame[i].cpu().numpy())
             actions_buffer.append(int(action[i] if num_envs > 1 else action))
             rewards_buffer.append(float(reward[i] if num_envs > 1 else reward))
-            done_i = bool(term[i] or trunc[i]) if num_envs > 1 else bool(term or trunc)
+            done_i = (
+                bool(term[i] or trunc[i])
+                if num_envs > 1
+                else bool(term or trunc)
+            )
             dones_buffer.append(done_i)
             collected += 1
             pbar.update(1)
@@ -166,7 +174,11 @@ def load_dataset_to_gpu(folder: str, *, batch_size: int = 2048):
     # ``(C, H, W)`` order, whereas :func:`frames_to_indices` expects the
     # channel dimension last. Convert the layout if necessary to avoid
     # shape mismatches when passing the frames through the VQ-VAE encoder.
-    if frames.ndim == 4 and frames.shape[-1] not in (1, 3) and frames.shape[1] in (1, 3):
+    if (
+        frames.ndim == 4
+        and frames.shape[-1] not in (1, 3)
+        and frames.shape[1] in (1, 3)
+    ):
         frames = frames.transpose(0, 2, 3, 1)
 
     ids = frames_to_indices(frames, vqvae, batch_size=batch_size)
