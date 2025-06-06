@@ -16,7 +16,5 @@ dataset:
   shard: 1000
 tasks:
   train:
-    - Phoenix
-    - Phoenix
-    - Phoenix
+    - SpaceInvaders
   eval: Phoenix
