@@ -27,8 +27,7 @@ def gather_offline_dataset(
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    env = make_atari_env(game, max_episode_steps=None)
-    env = gym.wrappers.RecordRGBArray(env)
+    env = make_atari_env(game, max_episode_steps=None, render_mode="rgb_array")
     obs, _ = env.reset()
 
     agent = PPO.load(policy, env=env) if policy is not None else None
@@ -43,7 +42,10 @@ def gather_offline_dataset(
         frame = env.render().transpose(2, 0, 1) / 255.0
         if frame.shape[1] != reso:
             frame = torch.nn.functional.interpolate(
-                torch.tensor(frame)[None], (reso, reso), mode="bilinear", align_corners=False
+                torch.tensor(frame)[None],
+                (reso, reso),
+                mode="bilinear",
+                align_corners=False,
             )[0]
         frame_np = frame.numpy()
         if agent is None:
@@ -85,6 +87,7 @@ def gather_offline_dataset(
 
     env.close()
     print("✓ Dataset collected")
+
 
 from ..utils.common import TORCH_DEVICE, ACTION_ID_START, PAD_TOKEN
 from ..models.vqvae_utils import frames_to_indices, vqvae
@@ -136,16 +139,29 @@ def fill_replay_buffer(
 ):
     """Push offline data into a replay buffer and optional global buffer."""
     current_episode = []
-    for frame_ids, action, reward, done in zip(frames, actions, rewards, dones):
+    for frame_ids, action, reward, done in zip(
+        frames, actions, rewards, dones
+    ):
         current_episode.append((frame_ids, int(action)))
         sequence = torch.stack(
             [
-                torch.cat((t, torch.tensor([ACTION_ID_START + act_], device=TORCH_DEVICE)))
+                torch.cat(
+                    (
+                        t,
+                        torch.tensor(
+                            [ACTION_ID_START + act_], device=TORCH_DEVICE
+                        ),
+                    )
+                )
                 for t, act_ in current_episode[-ctx:]
             ]
         )
         if sequence.size(0) < ctx:
-            pad = torch.full((ctx - sequence.size(0), sequence.size(1)), PAD_TOKEN, device=TORCH_DEVICE)
+            pad = torch.full(
+                (ctx - sequence.size(0), sequence.size(1)),
+                PAD_TOKEN,
+                device=TORCH_DEVICE,
+            )
             sequence = torch.cat((pad, sequence), 0)
         replay.add(sequence, float(reward))
         if global_buffer is not None:

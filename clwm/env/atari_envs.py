@@ -16,6 +16,7 @@ def make_atari_env(
     frameskip: int = 4,
     sticky: bool = True,
     max_episode_steps: int | None = None,
+    render_mode: str | None = None,
 ):
     base = f"ALE/{name}-v5"
     env = gym.make(
@@ -24,7 +25,7 @@ def make_atari_env(
         frameskip=frameskip,
         repeat_action_probability=0.25 if sticky else 0.0,
         full_action_space=True,
-        render_mode=None,
+        render_mode=render_mode,
     )
     env = wrap_reward_symlog(env)
     return env
@@ -37,6 +38,7 @@ def make_atari_vectorized_envs(
     sticky: bool = True,
     max_episode_steps: int | None = None,
     num_envs: int = 128,
+    render_mode: str | None = None,
 ):
     base = f"ALE/{name}-v5"
     envs = gym.make_vec(
@@ -48,6 +50,6 @@ def make_atari_vectorized_envs(
         frameskip=frameskip,
         repeat_action_probability=0.25 if sticky else 0.0,
         full_action_space=True,
-        render_mode=None,
+        render_mode=render_mode,
     )
     return envs

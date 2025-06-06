@@ -89,7 +89,9 @@ class CriticNetwork(nn.Module):
     def __init__(self, d):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(d, 512), nn.SiLU(), nn.Linear(512, len(REWARD_BINS), bias=False)
+            nn.Linear(d, 512),
+            nn.SiLU(),
+            nn.Linear(512, len(REWARD_BINS), bias=False),
         )
         nn.init.zeros_(self.net[-1].weight)
 

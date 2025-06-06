@@ -10,11 +10,13 @@ training:
   lam_return: 0.95
   lam: 0.1
 dataset:
-  base_dir: offline_data
+  base_dir: atari
   collect_steps: 10000
   reso: 84
   shard: 1000
 tasks:
   train:
+    - Phoenix
+    - Phoenix
     - Phoenix
   eval: Phoenix

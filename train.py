@@ -8,7 +8,12 @@ import argparse
 import yaml
 from pathlib import Path
 from clwm.models.vqvae import H16, W16, K
-from clwm.models.world_model import WorldModel, ActorNetwork, CriticNetwork, ReplayBuffer
+from clwm.models.world_model import (
+    WorldModel,
+    ActorNetwork,
+    CriticNetwork,
+    ReplayBuffer,
+)
 from clwm.utils import (
     TORCH_DEVICE,
     encode_two_hot,
@@ -16,7 +21,11 @@ from clwm.utils import (
     set_global_seed,
 )
 from clwm.utils.training_utils import split_cross_entropy, fisher_diagonal
-from clwm.utils.evaluation_utils import build_evaluation_sequences, evaluate_on_sequences, evaluate_policy
+from clwm.utils.evaluation_utils import (
+    build_evaluation_sequences,
+    evaluate_on_sequences,
+    evaluate_policy,
+)
 from clwm.data import (
     load_dataset_to_gpu,
     fill_replay_buffer,
@@ -32,7 +41,9 @@ PAD_TOKEN = K + MAX_ACTIONS  # mask token (rarely used)
 VOCAB_SIZE = PAD_TOKEN + 1  # embedding size 147
 
 
-def left_pad_sequence(seq: torch.Tensor, ctx: int, pad_id: int) -> torch.Tensor:
+def left_pad_sequence(
+    seq: torch.Tensor, ctx: int, pad_id: int
+) -> torch.Tensor:
     L = seq.size(0)
     if L >= ctx:
         return seq[-ctx:]
@@ -76,8 +87,12 @@ def train_on_task(
             if len(global_buffer) >= 13
             else []
         )
-        sequences = [x[0] for x in current_samples] + [x[0] for x in global_samples]
-        sample_rewards = [x[1] for x in current_samples] + [x[1] for x in global_samples]
+        sequences = [x[0] for x in current_samples] + [
+            x[0] for x in global_samples
+        ]
+        sample_rewards = [x[1] for x in current_samples] + [
+            x[1] for x in global_samples
+        ]
 
         batch = torch.stack(sequences).to(TORCH_DEVICE)  # (B, ctx, 26)
         reward_env = torch.tensor(
@@ -114,7 +129,10 @@ def train_on_task(
 
             # --- push action token, predict next latent -----------------
             roll = torch.cat(
-                [inp[:, -ctx * (N_PATCH + 1) :], (ACTION_ID_START + a_s).unsqueeze(1)],
+                [
+                    inp[:, -ctx * (N_PATCH + 1) :],
+                    (ACTION_ID_START + a_s).unsqueeze(1),
+                ],
                 1,
             )
             ntok = wm(roll)[:, -1].argmax(-1, keepdim=True)
@@ -159,7 +177,9 @@ def train_on_task(
         ).mean()  # −β·H(π)
 
         val_logits = critic(zs[-1].detach())
-        val_target = encode_two_hot(returns[:, 0])  # bootstrap λ-return per batch
+        val_target = encode_two_hot(
+            returns[:, 0]
+        )  # bootstrap λ-return per batch
         critic_loss = (
             -(val_target * torch.log_softmax(val_logits, -1)).sum(-1).mean()
         )
@@ -352,7 +372,13 @@ if __name__ == "__main__":
     base_dir = cfg["dataset"]["base_dir"]
 
     dim = cfg["model"]["dim"]
-    wm = WorldModel(d=dim, layers=cfg["model"]["layers"], heads=cfg["model"]["heads"]).to(TORCH_DEVICE).half()
+    wm = (
+        WorldModel(
+            d=dim, layers=cfg["model"]["layers"], heads=cfg["model"]["heads"]
+        )
+        .to(TORCH_DEVICE)
+        .half()
+    )
     actor = ActorNetwork(dim).to(TORCH_DEVICE).half()
     critic = CriticNetwork(dim).to(TORCH_DEVICE).half()
 
@@ -379,7 +405,9 @@ if __name__ == "__main__":
                 shard=cfg["dataset"].get("shard", 1000),
             )
 
-        frames_t, actions_t, rewards_t, dones_t = load_dataset_to_gpu(str(game_dir))
+        frames_t, actions_t, rewards_t, dones_t = load_dataset_to_gpu(
+            str(game_dir)
+        )
 
         replay = ReplayBuffer(30000)
         global_buffer = []
@@ -416,7 +444,9 @@ if __name__ == "__main__":
 
         losses.append(loss)
 
-        seq_eval = build_evaluation_sequences(wm, actor, eval_task, ctx=32, n_seq=256)
+        seq_eval = build_evaluation_sequences(
+            wm, actor, eval_task, ctx=32, n_seq=256
+        )
         ce_eval = evaluate_on_sequences(wm, seq_eval)
         print(f"Eval CE on {eval_task}: {ce_eval:.4f}")
         print(f"Score {eval_task}: {evaluate_policy(actor, wm, eval_task)}")
@@ -439,10 +469,16 @@ if __name__ == "__main__":
         else:
             if len(new_F) > len(running_fisher):
                 pad = len(new_F) - len(running_fisher)
-                running_fisher.extend([torch.zeros_like(t) for t in new_F[-pad:]])
-                running_weights.extend([p.detach().cpu() for p in params[-pad:]])
+                running_fisher.extend(
+                    [torch.zeros_like(t) for t in new_F[-pad:]]
+                )
+                running_weights.extend(
+                    [p.detach().cpu() for p in params[-pad:]]
+                )
 
-            for i, (F_run, F_new, p) in enumerate(zip(running_fisher, new_F, params)):
+            for i, (F_run, F_new, p) in enumerate(
+                zip(running_fisher, new_F, params)
+            ):
                 if F_run.shape == F_new.shape:
                     F_run.mul_(gamma).add_(F_new)
                     running_weights[i].copy_(p.detach().cpu())

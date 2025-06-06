@@ -26,9 +26,9 @@ vqvae = get_vqvae()
 @torch.no_grad()
 def frame_to_indices(frame_u8: np.ndarray, vqvae: VQVAE) -> np.ndarray:
     x = (
-        torch.tensor(frame_u8, dtype=torch.float32, device=TORCH_DEVICE).permute(
-            2, 0, 1
-        )
+        torch.tensor(
+            frame_u8, dtype=torch.float32, device=TORCH_DEVICE
+        ).permute(2, 0, 1)
         / 255.0
     )
     x = F.interpolate(

@@ -51,3 +51,6 @@ docs/_build/
 # container images
 *.simg
 *.sif
+
+# Data files
+*.npz

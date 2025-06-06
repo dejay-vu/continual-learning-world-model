@@ -19,12 +19,26 @@ from .utils.common import (
     unimix,
     unimix_generic,
 )
-from .models.vqvae_utils import get_vqvae, vqvae, frame_to_indices, frames_to_indices
+from .models.vqvae_utils import (
+    get_vqvae,
+    vqvae,
+    frame_to_indices,
+    frames_to_indices,
+)
 from .utils.training_utils import split_cross_entropy, fisher_diagonal
 from .env.atari_envs import make_atari_env, make_atari_vectorized_envs
-from .utils.evaluation_utils import build_evaluation_sequences, evaluate_on_sequences, evaluate_policy
+from .utils.evaluation_utils import (
+    build_evaluation_sequences,
+    evaluate_on_sequences,
+    evaluate_policy,
+)
 from .models.vqvae import VQVAE, H16, W16, K, RES, D_LAT
-from .models.world_model import WorldModel, ActorNetwork, CriticNetwork, ReplayBuffer
+from .models.world_model import (
+    WorldModel,
+    ActorNetwork,
+    CriticNetwork,
+    ReplayBuffer,
+)
 
 __all__ = [
     "FlashAttentionBlock",

@@ -2,7 +2,7 @@ import random
 import torch
 import numpy as np
 
-from .vqvae import K  # tokenizer constants
+from ..models.vqvae import K  # tokenizer constants
 
 MAX_ACTIONS = 18  # max Atari action‑space size
 ACTION_ID_START = K  # first action id (128)
