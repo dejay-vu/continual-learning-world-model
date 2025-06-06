@@ -1,16 +1,16 @@
 import gymnasium as gym
 from gymnasium.wrappers import TransformReward
 import ale_py
-from .utils import symlog
+from ..utils.common import symlog
 
 gym.register_envs(ale_py)
 
 
-def _wrap_reward(env):
+def wrap_reward_symlog(env):
     return TransformReward(env, lambda r: symlog(r))
 
 
-def make_atari(
+def make_atari_env(
     name: str,
     *,
     frameskip: int = 4,
@@ -26,11 +26,11 @@ def make_atari(
         full_action_space=True,
         render_mode=None,
     )
-    env = _wrap_reward(env)
+    env = wrap_reward_symlog(env)
     return env
 
 
-def make_atari_vectorized(
+def make_atari_vectorized_envs(
     name: str,
     *,
     frameskip: int = 4,
@@ -43,7 +43,7 @@ def make_atari_vectorized(
         base,
         num_envs=num_envs,
         vectorization_mode="async",
-        wrappers=[_wrap_reward],
+        wrappers=[wrap_reward_symlog],
         max_episode_steps=max_episode_steps,
         frameskip=frameskip,
         repeat_action_probability=0.25 if sticky else 0.0,

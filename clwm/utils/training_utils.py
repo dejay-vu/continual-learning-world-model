@@ -1,15 +1,15 @@
 import torch
 import torch.nn.functional as F
-from .utils import ACT_PAD, VOCAB, PAD
+from .common import ACTION_ID_START, VOCAB_SIZE, PAD_TOKEN
 
 
-def split_ce(logits: torch.Tensor, tgt: torch.Tensor):
+def split_cross_entropy(logits: torch.Tensor, tgt: torch.Tensor):
     """Split cross-entropy loss into image and action components."""
-    flat_logits = logits.view(-1, VOCAB)
+    flat_logits = logits.view(-1, VOCAB_SIZE)
     flat_tgt = tgt.reshape(-1)
 
-    m_img = flat_tgt < ACT_PAD
-    m_act = (flat_tgt >= ACT_PAD) & (flat_tgt != PAD)
+    m_img = flat_tgt < ACTION_ID_START
+    m_act = (flat_tgt >= ACTION_ID_START) & (flat_tgt != PAD_TOKEN)
 
     ce_img = (
         F.cross_entropy(flat_logits[m_img], flat_tgt[m_img], reduction="mean")
@@ -24,7 +24,7 @@ def split_ce(logits: torch.Tensor, tgt: torch.Tensor):
     return ce_img, ce_act
 
 
-def fisher_diag(model, batch: torch.Tensor, chunk: int = 64):
+def fisher_diagonal(model, batch: torch.Tensor, chunk: int = 64):
     diag = [
         torch.zeros_like(p, dtype=torch.float32, device="cpu")
         for p in model.parameters()
@@ -34,9 +34,9 @@ def fisher_diag(model, batch: torch.Tensor, chunk: int = 64):
     for i in range(0, batch.size(0), chunk):
         sub = batch[i : i + chunk].to(next(model.parameters()).device)
         loss = F.cross_entropy(
-            model(sub[:, :-1]).view(-1, VOCAB),
+            model(sub[:, :-1]).view(-1, VOCAB_SIZE),
             sub[:, 1:].reshape(-1),
-            ignore_index=PAD,
+            ignore_index=PAD_TOKEN,
             reduction="sum",
         )
         params = [p for p in model.parameters() if p.requires_grad]
@@ -45,7 +45,7 @@ def fisher_diag(model, batch: torch.Tensor, chunk: int = 64):
             if g is not None:
                 d += g.detach().cpu().pow(2)
 
-    N = (batch[:, 1:] != PAD).sum().item()
+    N = (batch[:, 1:] != PAD_TOKEN).sum().item()
     for idx, d in enumerate(diag):
         d.div_(N)
         diag[idx] = d
