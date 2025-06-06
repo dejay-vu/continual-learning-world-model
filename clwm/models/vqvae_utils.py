@@ -39,16 +39,30 @@ def frame_to_indices(frame_u8: np.ndarray, vqvae: VQVAE) -> np.ndarray:
 
 
 @torch.no_grad()
-def frames_to_indices(frames_u8: np.ndarray, vqvae: VQVAE) -> np.ndarray:
-    N = len(frames_u8)
-    x = (
-        torch.from_numpy(frames_u8)
-        .to(TORCH_DEVICE, dtype=torch.float32, non_blocking=True)
-        .permute(0, 3, 1, 2)
-        / 255.0
-    )
-    x = F.interpolate(x, (RES, RES), mode="bilinear", align_corners=False)
-    with torch.amp.autocast("cuda"):
-        lat = vqvae.enc(x)
-        _, ids, _ = vqvae.vq(lat.flatten(0, 1))
-    return ids.view(N, -1).cpu().numpy()
+def frames_to_indices(
+    frames_u8: np.ndarray, vqvae: VQVAE, *, batch_size: int = 2048
+) -> np.ndarray:
+    """Convert an array of uint8 frames to discrete VQ-VAE indices.
+
+    The previous implementation loaded the entire dataset onto the GPU at once,
+    which could easily exceed available memory for large datasets. The function
+    now processes the frames in smaller batches, drastically reducing the peak
+    memory usage during the conversion step.
+    """
+
+    ids_list = []
+    for i in range(0, len(frames_u8), batch_size):
+        batch = frames_u8[i : i + batch_size]
+        x = (
+            torch.from_numpy(batch)
+            .to(TORCH_DEVICE, dtype=torch.float32, non_blocking=True)
+            .permute(0, 3, 1, 2)
+            / 255.0
+        )
+        x = F.interpolate(x, (RES, RES), mode="bilinear", align_corners=False)
+        with torch.amp.autocast("cuda"):
+            lat = vqvae.enc(x)
+            _, ids, _ = vqvae.vq(lat.flatten(0, 1))
+        ids_list.append(ids.view(x.size(0), -1).cpu())
+
+    return torch.cat(ids_list, 0).numpy()

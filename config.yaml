@@ -14,6 +14,10 @@ dataset:
   collect_steps: 10000
   reso: 84
   shard: 1000
+  # Number of frames processed at once when converting to VQ-VAE indices
+  load_bs: 2048
+  # Parallel envs during dataset collection
+  num_envs: 8
 tasks:
   train:
     - Phoenix
