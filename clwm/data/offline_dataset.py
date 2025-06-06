@@ -161,6 +161,14 @@ def load_dataset_to_gpu(folder: str, *, batch_size: int = 2048):
         indices. Reducing this value lowers peak GPU memory usage.
     """
     frames, actions, rewards, dones = read_npz_dataset(folder)
+
+    # Datasets collected with ``gather_offline_dataset`` store frames in
+    # ``(C, H, W)`` order, whereas :func:`frames_to_indices` expects the
+    # channel dimension last. Convert the layout if necessary to avoid
+    # shape mismatches when passing the frames through the VQ-VAE encoder.
+    if frames.ndim == 4 and frames.shape[-1] not in (1, 3) and frames.shape[1] in (1, 3):
+        frames = frames.transpose(0, 2, 3, 1)
+
     ids = frames_to_indices(frames, vqvae, batch_size=batch_size)
     return (
         torch.tensor(ids, device=TORCH_DEVICE),

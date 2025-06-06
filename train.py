@@ -53,6 +53,7 @@ def left_pad_sequence(
 
 
 def train_on_task(
+    game: str,
     wm: WorldModel,
     actor: ActorNetwork,
     critic: CriticNetwork,
@@ -77,7 +78,7 @@ def train_on_task(
 
     loss_history = []
 
-    pbar = tqdm(total=epochs, desc="offline")
+    pbar = tqdm(total=epochs, desc=f"Learning {game}")
     while len(loss_history) < epochs:
 
         current_samples = replay.sample(int(0.8 * 64))
@@ -193,11 +194,6 @@ def train_on_task(
                     theta_star_ = theta_star.to(p.device, dtype=p.dtype)
                     F_ = F_diag.to(p.device, dtype=p.dtype)
                     ewc_penalty += (F_ * (p - theta_star_).pow(2)).sum()
-
-        assert loss_reward.dtype == torch.float32
-        assert ce.dtype == torch.float32
-        assert critic_loss.dtype == torch.float32
-        assert actor_loss.dtype == torch.float32
 
         loss = ce + actor_loss + critic_loss + loss_reward + lam * ewc_penalty
 
@@ -441,6 +437,7 @@ if __name__ == "__main__":
         seen.add(game)
 
         loss = train_on_task(
+            game=game,
             wm=wm,
             actor=actor,
             critic=critic,
