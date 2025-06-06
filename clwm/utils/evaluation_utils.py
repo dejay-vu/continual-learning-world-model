@@ -1,13 +1,13 @@
 import numpy as np
 import torch
-from .envs import make_atari_vectorized
-from .train_utils import split_ce
-from .utils import DEVICE, ACT_PAD, symexp
-from .vq_utils import frames_to_ids, vqvae
+from ..env.atari_envs import make_atari_vectorized_envs
+from .training_utils import split_cross_entropy
+from .common import TORCH_DEVICE, ACTION_ID_START, symexp
+from ..models.vqvae_utils import frames_to_indices, vqvae
 
 
 @torch.no_grad()
-def build_eval_seq(
+def build_evaluation_sequences(
     wm,
     actor,
     env_name: str,
@@ -16,7 +16,7 @@ def build_eval_seq(
     n_seq: int = 128,
     num_envs: int = 128,
 ):
-    envs = make_atari_vectorized(env_name, num_envs=num_envs)
+    envs = make_atari_vectorized_envs(env_name, num_envs=num_envs)
     obs, _ = envs.reset(seed=123)
 
     seqs: list[torch.Tensor] = []
@@ -26,8 +26,8 @@ def build_eval_seq(
     wm.eval()
 
     while len(seqs) < n_seq:
-        ids_batch = frames_to_ids(obs, vqvae)
-        z_batch = wm.tok(torch.tensor(ids_batch, device=DEVICE)).mean(1)
+        ids_batch = frames_to_indices(obs, vqvae)
+        z_batch = wm.tok(torch.tensor(ids_batch, device=TORCH_DEVICE)).mean(1)
         actions = (
             torch.distributions.Categorical(actor(z_batch))
             .sample()
@@ -39,7 +39,7 @@ def build_eval_seq(
             if len(eps[e]) >= ctx:
                 seq = torch.stack(
                     [
-                        torch.tensor(np.append(t, ACT_PAD + a_))
+                        torch.tensor(np.append(t, ACTION_ID_START + a_))
                         for t, a_ in eps[e][-ctx:]
                     ]
                 )
@@ -56,23 +56,23 @@ def build_eval_seq(
 
 
 @torch.no_grad()
-def eval_on_sequences(wm, seq_batch):
-    batch = torch.stack(seq_batch).to(DEVICE)
+def evaluate_on_sequences(wm, seq_batch):
+    batch = torch.stack(seq_batch).to(TORCH_DEVICE)
     B = batch.size(0)
     inp = batch[:, :-1].reshape(B, -1)
     tgt = batch[:, 1:].reshape(B, -1)
 
     logits = wm(inp)
-    ce_img, ce_act = split_ce(logits, tgt)
+    ce_img, ce_act = split_cross_entropy(logits, tgt)
     print(f"eval_img_ce={ce_img.item():.4f}  eval_act_ce={ce_act.item():.4f}")
     return 0.4 * ce_img + 0.6 * ce_act
 
 
 @torch.no_grad()
-def eval_policy(
+def evaluate_policy(
     actor, wm, env_name: str, *, episodes: int = 128, num_envs: int = 128
 ):
-    envs = make_atari_vectorized(env_name, num_envs=num_envs)
+    envs = make_atari_vectorized_envs(env_name, num_envs=num_envs)
     obs, _ = envs.reset(seed=0)
 
     ep_scores = np.zeros(num_envs, dtype=np.float32)
@@ -80,8 +80,8 @@ def eval_policy(
     finished = []
 
     while len(finished) < episodes:
-        ids_batch = frames_to_ids(obs, vqvae)
-        z_batch = wm.tok(torch.tensor(ids_batch, device=DEVICE)).mean(1)
+        ids_batch = frames_to_indices(obs, vqvae)
+        z_batch = wm.tok(torch.tensor(ids_batch, device=TORCH_DEVICE)).mean(1)
         actions = (
             torch.distributions.Categorical(actor(z_batch))
             .sample()

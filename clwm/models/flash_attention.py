@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from flash_attn.layers.rotary import RotaryEmbedding
 from flash_attn import flash_attn_qkvpacked_func
-from .lora import LoRA
+from .lora_layer import LoRA
 
 
 class FlashAttentionBlock(nn.Module):

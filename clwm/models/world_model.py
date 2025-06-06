@@ -3,11 +3,11 @@ import random
 from torch import nn
 import torch.nn.functional as F
 from collections import deque
-from .flash_attn_block import FlashAttentionBlock
-from .utils import MAX_ACT, VOCAB, BINS, unimix_generic
+from .flash_attention import FlashAttentionBlock
+from ..utils.common import MAX_ACTIONS, VOCAB_SIZE, REWARD_BINS, unimix_generic
 
 
-class Buffer:
+class ReplayBuffer:
     def __init__(self, cap):
         self.b = deque(maxlen=cap)
 
@@ -21,7 +21,7 @@ class Buffer:
 class WorldModel(nn.Module):
     def __init__(self, d=256, layers=6, heads=8):
         super().__init__()
-        self.tok = nn.Embedding(VOCAB, d)
+        self.tok = nn.Embedding(VOCAB_SIZE, d)
         self.blocks = nn.ModuleList(
             [
                 FlashAttentionBlock(d_model=d, n_head=heads)
@@ -29,8 +29,8 @@ class WorldModel(nn.Module):
             ]
         )
         self.ln = nn.LayerNorm(d)
-        self.head = nn.Linear(d, VOCAB, bias=False)
-        self.reward_head = nn.Linear(d, len(BINS), bias=False)
+        self.head = nn.Linear(d, VOCAB_SIZE, bias=False)
+        self.reward_head = nn.Linear(d, len(REWARD_BINS), bias=False)
         nn.init.zeros_(self.reward_head.weight)
 
     def add_task(self):
@@ -59,11 +59,11 @@ class WorldModel(nn.Module):
         return out if len(out) > 1 else out[0]
 
 
-class Actor(nn.Module):
+class ActorNetwork(nn.Module):
     def __init__(self, d_lat):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(d_lat, 512), nn.ReLU(), nn.Linear(512, MAX_ACT)
+            nn.Linear(d_lat, 512), nn.ReLU(), nn.Linear(512, MAX_ACTIONS)
         )
 
     def forward(self, z, p_unimix: float = 0.01):
@@ -78,20 +78,20 @@ class Actor(nn.Module):
         Returns
         -------
         probs : torch.Tensor
-            Smoothed action distribution, shape (B, MAX_ACT), ∑=1.
+            Smoothed action distribution, shape (B, MAX_ACTIONS), ∑=1.
         """
-        logits = self.net(z)  # (B, MAX_ACT)
+        logits = self.net(z)  # (B, MAX_ACTIONS)
         probs = unimix_generic(logits, p_unimix)  # 1 % uniform mix
         return probs
 
 
-class Critic(nn.Module):
+class CriticNetwork(nn.Module):
     def __init__(self, d):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(d, 512), nn.SiLU(), nn.Linear(512, len(BINS), bias=False)
+            nn.Linear(d, 512), nn.SiLU(), nn.Linear(512, len(REWARD_BINS), bias=False)
         )
         nn.init.zeros_(self.net[-1].weight)
 
     def forward(self, z):
-        return self.net(z)  # (B, |BINS|) logits
+        return self.net(z)  # (B, |REWARD_BINS|) logits

@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 from safetensors.torch import load_file
 from .vqvae import VQVAE, RES, D_LAT
-from .utils import DEVICE, CHECKPOINT
+from ..utils.common import TORCH_DEVICE, VQVAE_CHECKPOINT
 
 _VQVAE_SINGLETON: VQVAE | None = None
 
@@ -11,8 +11,8 @@ _VQVAE_SINGLETON: VQVAE | None = None
 def get_vqvae() -> VQVAE:
     global _VQVAE_SINGLETON
     if _VQVAE_SINGLETON is None:
-        vqvae = VQVAE().to(DEVICE)
-        vqvae.load_state_dict(load_file(CHECKPOINT, device=DEVICE))
+        vqvae = VQVAE().to(TORCH_DEVICE)
+        vqvae.load_state_dict(load_file(VQVAE_CHECKPOINT, device=TORCH_DEVICE))
         vqvae.eval()
         for p in vqvae.parameters():
             p.requires_grad_(False)
@@ -24,9 +24,9 @@ vqvae = get_vqvae()
 
 
 @torch.no_grad()
-def frame_to_ids(frame_u8: np.ndarray, vqvae: VQVAE) -> np.ndarray:
+def frame_to_indices(frame_u8: np.ndarray, vqvae: VQVAE) -> np.ndarray:
     x = (
-        torch.tensor(frame_u8, dtype=torch.float32, device=DEVICE).permute(
+        torch.tensor(frame_u8, dtype=torch.float32, device=TORCH_DEVICE).permute(
             2, 0, 1
         )
         / 255.0
@@ -39,11 +39,11 @@ def frame_to_ids(frame_u8: np.ndarray, vqvae: VQVAE) -> np.ndarray:
 
 
 @torch.no_grad()
-def frames_to_ids(frames_u8: np.ndarray, vqvae: VQVAE) -> np.ndarray:
+def frames_to_indices(frames_u8: np.ndarray, vqvae: VQVAE) -> np.ndarray:
     N = len(frames_u8)
     x = (
         torch.from_numpy(frames_u8)
-        .to(DEVICE, dtype=torch.float32, non_blocking=True)
+        .to(TORCH_DEVICE, dtype=torch.float32, non_blocking=True)
         .permute(0, 3, 1, 2)
         / 255.0
     )
