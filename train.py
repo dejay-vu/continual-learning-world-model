@@ -406,7 +406,8 @@ if __name__ == "__main__":
             )
 
         frames_t, actions_t, rewards_t, dones_t = load_dataset_to_gpu(
-            str(game_dir)
+            str(game_dir),
+            batch_size=cfg["dataset"].get("load_bs", 2048),
         )
 
         replay = ReplayBuffer(30000)
