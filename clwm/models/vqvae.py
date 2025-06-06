@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from vector_quantize_pytorch import VectorQuantize
@@ -13,7 +14,9 @@ EMA = 0.9  # decay for the EMA in VectorQuantize
 
 # --------- tiny CNN encoder/decoder ---
 class Encoder(nn.Module):
-    def __init__(self):
+    """Tiny CNN encoder used by the VQ‑VAE."""
+
+    def __init__(self) -> None:
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(3, 32, 4, 2, 1),
@@ -27,14 +30,16 @@ class Encoder(nn.Module):
         )
         self.to_lat = nn.Linear(256, D_LAT)
 
-    def forward(self, x):
-        h = self.conv(x)  # [B,256,6,6]
-        h = h.flatten(2).transpose(1, 2)  # [B,36,256]
-        return self.to_lat(h)  # [B,36,D]
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.conv(x)
+        h = h.flatten(2).transpose(1, 2)
+        return self.to_lat(h)
 
 
 class Decoder(nn.Module):
-    def __init__(self):
+    """Mirror image of :class:`Encoder` for reconstruction."""
+
+    def __init__(self) -> None:
         super().__init__()
         self.to_feat = nn.Linear(D_LAT, 256)
         self.deconv = nn.Sequential(
@@ -48,9 +53,9 @@ class Decoder(nn.Module):
             nn.ConvTranspose2d(32, 3, 4, 2, 1),
         )
 
-    def forward(self, z):
-        B, N, _ = z.shape
-        z = self.to_feat(z).transpose(1, 2).view(B, 256, H16, W16)
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        bsz, _, _ = z.shape
+        z = self.to_feat(z).transpose(1, 2).view(bsz, 256, H16, W16)
         x = self.deconv(z)
         return F.interpolate(
             x, (RES, RES), mode="bilinear", align_corners=False
@@ -59,7 +64,9 @@ class Decoder(nn.Module):
 
 # -------------- VQ-VAE -----------------
 class VQVAE(nn.Module):
-    def __init__(self):
+    """Lightweight VQ‑VAE used for frame tokenisation."""
+
+    def __init__(self) -> None:
         super().__init__()
         self.enc = Encoder()
         self.vq = VectorQuantize(
@@ -71,19 +78,18 @@ class VQVAE(nn.Module):
         )
         self.dec = Decoder()
 
-    def forward(self, x):
-        lat = self.enc(x)  # [B,N,D]
-        B, N, _ = lat.shape
+    def forward(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        lat = self.enc(x)
+        bsz, n_tok, _ = lat.shape
 
         z_q, ids, vq_loss = self.vq(lat.view(-1, D_LAT))
-        z_q = z_q.view(B, N, D_LAT)
+        z_q = z_q.view(bsz, n_tok, D_LAT)
 
-        # -------- decode & pixel loss -------------
         recon = self.dec(z_q).clamp(0, 1)
-        rec_loss = F.mse_loss(recon, x)  # or BCE if you prefer
+        rec_loss = F.mse_loss(recon, x)
 
-        # -------- total VQVAE loss ---------------
-        loss = rec_loss + vq_loss  # vq_loss already includes commitment
+        loss = rec_loss + vq_loss
 
-        # -------- logging ------------------------
-        return recon, loss, rec_loss, ids  # keep signature for trainer
+        return recon, loss, rec_loss, ids

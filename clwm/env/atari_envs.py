@@ -6,7 +6,9 @@ from ..utils.common import symlog
 gym.register_envs(ale_py)
 
 
-def wrap_reward_symlog(env):
+def wrap_reward_symlog(env: gym.Env) -> gym.Env:
+    """Return a wrapper that applies :func:`symlog` to rewards."""
+
     return TransformReward(env, lambda r: symlog(r))
 
 
@@ -17,7 +19,8 @@ def make_atari_env(
     sticky: bool = True,
     max_episode_steps: int | None = None,
     render_mode: str | None = None,
-):
+) -> gym.Env:
+    """Create a single Atari environment with symlog reward transformation."""
     base = f"ALE/{name}-v5"
     env = gym.make(
         base,
@@ -39,7 +42,13 @@ def make_atari_vectorized_envs(
     max_episode_steps: int | None = None,
     num_envs: int = 128,
     render_mode: str | None = None,
-):
+) -> gym.vector.VectorEnv:
+    """Create vectorized Atari environments.
+
+    When ``name`` is a list, each element becomes one environment in the
+    vector. The function automatically falls back to a synchronous vector
+    environment if asynchronous creation fails.
+    """
     if isinstance(name, str):
         base = f"ALE/{name}-v5"
         envs = gym.make_vec(
