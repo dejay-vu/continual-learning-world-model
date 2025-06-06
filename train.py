@@ -2,7 +2,6 @@
 import random
 import torch
 from torch.optim import Adam
-import numpy as np
 from tqdm import tqdm
 import argparse
 import yaml
