@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 import random
+from typing import List
+
 import torch
 from torch.optim import Adam
 from tqdm import tqdm
@@ -32,7 +34,11 @@ from clwm.data import (
     gather_datasets_parallel,
 )
 
-set_global_seed(1)
+# Global random seed will be set later (after CLI parse) to allow reproducible
+# held-out game selection.
+# We still default to 1 in case the user does not override via --seed.
+
+DEFAULT_RANDOM_SEED = 1
 
 N_PATCH = H16 * W16  # 25 tokens / frame
 MAX_ACTIONS = 18  # max Atari action‑space size
@@ -82,9 +88,11 @@ def train_on_task(
     pbar = tqdm(total=epochs, desc=f"Learning {game}")
     while len(loss_history) < epochs:
 
-        current_samples = replay.sample(int(0.8 * 64))
+        BATCH_SIZE = 64
+
+        current_samples = replay.sample(int(0.8 * BATCH_SIZE))
         global_samples = (
-            random.sample(global_buffer, int(0.2 * 64))
+            random.sample(global_buffer, int(0.2 * BATCH_SIZE))
             if len(global_buffer) >= 13
             else []
         )
@@ -232,138 +240,43 @@ def train_on_task(
     return ce
 
 
-# TASKS = [
-#     "SpaceInvaders",
-#     "Assault",
-#     "DemonAttack",
-#     "AirRaid",
-#     "Atlantis",
-#     "BeamRider",
-#     "StarGunner",
-#     "Galaxian",
-#     "Solaris",
-#     "Zaxxon",
-# ]
-# eval_task = "Phoenix"
-
-# TASKS = [
-#     "Adventure",
-#     "AirRaid",
-#     "Alien",
-#     "Amidar",
-#     "Assault",
-#     "Asterix",
-#     "Asteroids",
-#     "Atlantis",
-#     "Atlantis2",
-#     "Backgammon",
-#     "BankHeist",
-#     "BasicMath",
-#     "BattleZone",
-#     "BeamRider",
-#     "Berzerk",
-#     "Blackjack",
-#     "Bowling",
-#     "Boxing",
-#     "Carnival",
-#     "Casino",
-#     "Centipede",
-#     "ChopperCommand",
-#     "CrazyClimber",
-#     "Crossbow",
-#     "Darkchambers",
-#     "Defender",
-#     "DemonAttack",
-#     "DonkeyKong",
-#     "DoubleDunk",
-#     "Earthworld",
-#     "ElevatorAction",
-#     "Enduro",
-#     "Entombed",
-#     "Et",
-#     "FishingDerby",
-#     "FlagCapture",
-#     "Freeway",
-#     "Frogger",
-#     "Frostbite",
-#     "Galaxian",
-#     "Gopher",
-#     "Gravitar",
-#     "Hangman",
-#     "HauntedHouse",
-#     "Hero",
-#     "HumanCannonball",
-#     "IceHockey",
-#     "Jamesbond",
-#     "JourneyEscape",
-#     "Kaboom",
-#     "Kangaroo",
-#     "KeystoneKapers",
-#     "KingKong",
-#     "Klax",
-#     "Koolaid",
-#     "Krull",
-#     "KungFuMaster",
-#     "LaserGates",
-#     "LostLuggage",
-#     "MarioBros",
-#     "MiniatureGolf",
-#     "MontezumaRevenge",
-#     "MrDo",
-#     "MsPacman",
-#     "NameThisGame",
-#     "Othello",
-#     "Pacman",
-#     "Phoenix",
-#     "Pitfall",
-#     "Pitfall2",
-#     "Pong",
-#     "Pooyan",
-#     "PrivateEye",
-#     "Qbert",
-#     "Riverraid",
-#     "RoadRunner",
-#     "Robotank",
-#     "Seaquest",
-#     "SirLancelot",
-#     "Skiing",
-#     "Solaris",
-#     "SpaceInvaders",
-#     "SpaceWar",
-#     "StarGunner",
-#     "Superman",
-#     "Surround",
-#     "Tennis",
-#     "Tetris",
-#     "TicTacToe3D",
-#     "TimePilot",
-#     "Trondead",
-#     "Turmoil",
-#     "Tutankham",
-#     "UpNDown",
-#     "Venture",
-#     "VideoCheckers",
-#     "VideoChess",
-#     "VideoCube",
-#     "VideoPinball",
-#     "WizardOfWor",
-#     "WordZapper",
-#     "YarsRevenge",
-#     "Zaxxon",
-# ]
-# eval_task = "Breakout"
-
-
-TASKS = []
-eval_task = ""
+TASKS: list[str] = []
 
 
 if __name__ == "__main__":
     cli = argparse.ArgumentParser()
     cli.add_argument("--config", type=str, default="config.yaml")
+
+    # New arguments for category-based training.
+    cli.add_argument(
+        "--categories",
+        type=str,
+        nargs="+",
+        help="One or more game categories to train on (space-separated).",
+    )
+    cli.add_argument(
+        "--zero-shot",
+        action="store_true",
+        help="Exclude the held-out evaluation game(s) from the training list.",
+    )
+    cli.add_argument(
+        "--seed",
+        type=int,
+        default=DEFAULT_RANDOM_SEED,
+        help="Random seed used for held-out game selection and shuffling.",
+    )
+
     args = cli.parse_args()
 
+    # ================================================================
+    #  Load configuration and set random seeds
+    # ================================================================
+
     cfg = yaml.safe_load(open(args.config))
+
+    # Set global seed for reproducibility AFTER reading the seed argument so
+    # that held-out game selection is deterministic w.r.t. the provided seed.
+    set_global_seed(args.seed)
 
     base_dir = cfg["dataset"]["base_dir"]
 
@@ -377,13 +290,51 @@ if __name__ == "__main__":
     running_weights = None
     running_fisher = None
 
-    TASKS.extend(cfg["tasks"]["train"])
-    eval_task = cfg["tasks"]["eval"]
+    # ------------------------------------------------------------------
+    # Determine training and evaluation game lists.
+    # ------------------------------------------------------------------
 
-    losses = []
+    def _load_categories() -> dict[str, List[str]]:
+        path = Path(__file__).resolve().parent / "atari.yaml"
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Could not locate atari.yaml at expected path {path}"
+            )
+        return yaml.safe_load(open(path, "r"))["categories"]
 
+    held_out_games: List[str] = []
+    eval_tasks: List[str] = []
+
+    available_categories = _load_categories()
+
+    unknown = [c for c in args.categories if c not in available_categories]
+    if unknown:
+        raise ValueError(
+            "Unknown category names: "
+            + ", ".join(unknown)
+            + ". Available categories are: "
+            + ", ".join(available_categories)
+            + "."
+        )
+
+    for cat in args.categories:
+        games = available_categories[cat]
+        held_out = random.choice(games)
+        held_out_games.append(held_out)
+
+        if not args.zero_shot:
+            TASKS.extend(games)
+        else:
+            TASKS.extend([g for g in games if g != held_out])
+
+    TASKS = list(dict.fromkeys(TASKS))  # remove duplicates, preserve order
+    eval_tasks = held_out_games
+
+    # Randomize training order for continual learning setting.
     seen = set()
     random.shuffle(TASKS)
+
+    losses = []
 
     missing = [
         game
@@ -444,12 +395,14 @@ if __name__ == "__main__":
 
         losses.append(loss)
 
-        seq_eval = build_evaluation_sequences(
-            wm, actor, eval_task, ctx=32, n_seq=256
-        )
-        ce_eval = evaluate_on_sequences(wm, seq_eval)
-        print(f"Eval CE on {eval_task}: {ce_eval:.4f}")
-        print(f"Score {eval_task}: {evaluate_policy(actor, wm, eval_task)}")
+        for _eval_game in eval_tasks:
+            seq_eval = build_evaluation_sequences(
+                wm, actor, _eval_game, ctx=32, n_seq=256
+            )
+            ce_eval = evaluate_on_sequences(wm, seq_eval)
+            print(f"Eval CE on {_eval_game}: {ce_eval:.4f}")
+            score = evaluate_policy(actor, wm, _eval_game)
+            print(f"Score {_eval_game}: {score}")
 
         gamma = 0.9
         k = min(256, len(replay.b))

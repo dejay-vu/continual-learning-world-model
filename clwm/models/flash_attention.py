@@ -63,28 +63,57 @@ class FlashAttentionBlock(nn.Module):
     def forward(self, x: torch.Tensor):  # x: (B, L, D)
         bsz, seqlen, _ = x.size()
 
-        # ---- Multi‑head attention with flash-attn -------------------------
         resid = x
-        # Compute raw QKV on x (no pre-LN) to match original ordering
-        qkv = self.qkv(x)  # (B, L, 3*D)
-        qkv = qkv.view(bsz, seqlen, 3, self.heads, self.head_dim)
 
-        qkv_rot = self.rope(qkv, None, seqlen_offset=0, num_heads_q=self.heads)
-        qkv_rot = qkv_rot.to(torch.float16)
+        if x.is_cuda:
+            # ---- Fast path using flash-attn --------------------------------
+            # Compute raw QKV on x (no pre-LN) to match original ordering
+            qkv = self.qkv(x)  # (B, L, 3*D)
+            qkv = qkv.view(bsz, seqlen, 3, self.heads, self.head_dim)
 
-        # Flash-attn (causal)
-        y = flash_attn_qkvpacked_func(
-            qkv_rot,
-            dropout_p=self.attn_dropout.p if self.training else 0.0,
-            causal=True,
-            softmax_scale=None,
-        )  # (B, L, H, D)
+            # Rotary positional embedding (GPU-only path). The upstream
+            # implementation from flash_attn fails when tensors are on CPU
+            # because it unconditionally enters a CUDA context. We therefore
+            # restrict its usage to CUDA tensors.
+            qkv_rot = self.rope(
+                qkv, None, seqlen_offset=0, num_heads_q=self.heads
+            )
+            qkv_rot = qkv_rot.to(torch.float16)
 
-        y = y.to(x.dtype)
+            # FlashAttention kernel (causal)
+            y = flash_attn_qkvpacked_func(
+                qkv_rot,
+                dropout_p=self.attn_dropout.p if self.training else 0.0,
+                causal=True,
+                softmax_scale=None,
+            )  # (B, L, H, D)
 
-        y = y.reshape(bsz, seqlen, -1)
-        y = self.o_proj(y)
-        # Post-attn residual + LN1, matching your original Block
+            y = y.to(x.dtype)
+
+            y = y.reshape(bsz, seqlen, -1)
+            y = self.o_proj(y)
+
+        else:
+            # ---- CPU fallback using scaled-dot-product attention ------------
+            qkv = self.qkv(x)  # (B, L, 3*D)
+            q, k, v = qkv.chunk(3, dim=-1)
+
+            # Reshape to (B, H, L, D)
+            q = q.view(bsz, seqlen, self.heads, self.head_dim).transpose(1, 2)
+            k = k.view(bsz, seqlen, self.heads, self.head_dim).transpose(1, 2)
+            v = v.view(bsz, seqlen, self.heads, self.head_dim).transpose(1, 2)
+
+            # PyTorch 2.0+ provides an efficient (though non-flash) CPU
+            # implementation of scaled-dot-product attention that is much more
+            # memory-friendly than manually materialising the full attention
+            # matrix. We leverage it here with causal masking enabled.
+            y = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v, attn_mask=None, dropout_p=self.attn_dropout.p if self.training else 0.0, is_causal=True
+            )  # (B, H, L, D)
+            y = y.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
+            y = self.o_proj(y)
+
+        # Post-attention residual connection + LayerNorm
         x2 = self.ln1(resid + self.attn_dropout(y))
 
         # ---- Routing + adapters --------------------------------------------

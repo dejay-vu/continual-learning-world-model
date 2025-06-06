@@ -4,7 +4,8 @@ from pathlib import Path
 import gymnasium as gym
 from stable_baselines3 import PPO
 
-from ..env.atari_envs import make_atari_env
+from ..env.atari_envs import make_atari_env, make_atari_vectorized_envs
+from tqdm import tqdm
 
 
 def gather_offline_dataset(
@@ -117,7 +118,15 @@ def gather_datasets_parallel(
 
     pbar = tqdm(total=steps * len(games), desc="collect")
     while any(b["count"] < steps for b in buffers):
-        frame = envs.render().transpose(0, 3, 1, 2)
+        # Gymnasium vector environments may return a tuple/list of per-env
+        # frames when using the "rgb_array" render mode. Convert this into a
+        # single numpy array with shape (n_env, C, H, W) expected by the
+        # subsequent code path.
+        frame = envs.render()
+        if isinstance(frame, (list, tuple)):
+            frame = np.stack(frame, axis=0)
+        # Convert from (N, H, W, C) → (N, C, H, W)
+        frame = frame.transpose(0, 3, 1, 2)
         if frame.shape[2] != reso:
             frame = torch.nn.functional.interpolate(
                 torch.tensor(frame),
@@ -153,7 +162,17 @@ def gather_datasets_parallel(
                 buf["dones"].clear()
                 buf["idx"] += 1
 
-        envs.reset_done()
+        # Gymnasium's vector environments used to provide a `reset_done()`
+        # helper that reset only the environments that reached a terminal
+        # or truncated state.  In newer versions this utility has been
+        # removed because the library can automatically perform the reset
+        # on the next ``step`` call when ``autoreset_mode`` is set to
+        # ``NEXT_STEP`` (the current default).  To stay compatible with
+        # both older and newer gymnasium releases we only call the method
+        # when it is actually present.
+
+        if hasattr(envs, "reset_done"):
+            envs.reset_done()
 
     pbar.close()
 
@@ -181,7 +200,23 @@ def read_npz_dataset(folder: str):
     frames, actions, rewards, dones = [], [], [], []
     for f in sorted(p.glob("*.npz")):
         data = np.load(f)
-        frames.append(data["frames"])
+        f_arr = data["frames"]
+        # Ensure frames are in (N, H, W, C) format. Some older dataset shards
+        # were saved using channel-first layout (N, C, H, W). We detect that
+        # case and transpose on-the-fly so that downstream VQ-VAE encoding
+        # always receives a consistent channel-last representation.
+        if f_arr.ndim == 4 and f_arr.shape[-1] == 3:
+            # Already (N, H, W, 3)
+            pass
+        elif f_arr.ndim == 4 and f_arr.shape[1] == 3:
+            # Convert from (N, 3, H, W) → (N, H, W, 3)
+            f_arr = f_arr.transpose(0, 2, 3, 1)
+        else:
+            raise ValueError(
+                f"Unexpected frame array shape {f_arr.shape} in {f}. Expected 4-D with channel dimension size 3."
+            )
+
+        frames.append(f_arr)
         actions.append(data["actions"])
         rewards.append(data["rewards"])
         dones.append(data["dones"])
@@ -196,10 +231,14 @@ def read_npz_dataset(folder: str):
 
 
 @torch.no_grad()
-def load_dataset_to_gpu(folder: str):
-    """Load dataset and convert all arrays to GPU tensors."""
+def load_dataset_to_gpu(folder: str, batch_size: int = 2048):
+    """Load dataset and convert all arrays to GPU tensors.
+
+    Processes frames in batches of size ``batch_size`` to reduce peak memory
+    usage when encoding to VQ-VAE indices.
+    """
     frames, actions, rewards, dones = read_npz_dataset(folder)
-    ids = frames_to_indices(frames, vqvae)
+    ids = frames_to_indices(frames, vqvae, batch_size=batch_size)
     return (
         torch.tensor(ids, device=TORCH_DEVICE),
         torch.tensor(actions, device=TORCH_DEVICE),

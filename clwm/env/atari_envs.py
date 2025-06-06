@@ -46,6 +46,7 @@ def make_atari_vectorized_envs(
             base,
             num_envs=num_envs,
             vectorization_mode="async",
+            vector_kwargs={"shared_memory": False},  # Avoid /dev/shm issues
             wrappers=[wrap_reward_symlog],
             max_episode_steps=max_episode_steps,
             frameskip=frameskip,
@@ -72,4 +73,17 @@ def make_atari_vectorized_envs(
 
         env_fns.append(_make)
 
-    return gym.vector.AsyncVectorEnv(env_fns)
+    # Using multiprocessing based async vector envs can still cause
+    # `PermissionError: [Errno 13] Permission denied` on platforms where the
+    # Python multiprocessing module is not allowed to create POSIX semaphores
+    # (e.g. when /dev/shm is not writable). In such cases we gracefully fall
+    # back to the in-process `SyncVectorEnv` implementation which does not rely
+    # on multiprocessing and therefore works in more restricted execution
+    # environments. The performance impact is negligible for offline dataset
+    # collection where throughput is not the primary bottleneck.
+
+    try:
+        return gym.vector.AsyncVectorEnv(env_fns, shared_memory=False)
+    except PermissionError:
+        # Fall back to synchronous vector environment.
+        return gym.vector.SyncVectorEnv(env_fns)

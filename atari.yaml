@@ -1,0 +1,126 @@
+categories:
+  shooter:
+    - AirRaid
+    - Alien
+    - Assault
+    - Asteroids
+    - Atlantis
+    - Atlantis2
+    - BattleZone
+    - BeamRider
+    - Berzerk
+    - Carnival
+    - Centipede
+    - ChopperCommand
+    - Crossbow
+    - Defender
+    - DemonAttack
+    - Galaxian
+    - Gravitar
+    - Jamesbond
+    - LaserGates
+    - NameThisGame
+    - Phoenix
+    - Pooyan
+    - Riverraid
+    - Robotank
+    - Seaquest
+    - SirLancelot
+    - Solaris
+    - SpaceInvaders
+    - SpaceWar
+    - StarGunner
+    - TimePilot
+    - Turmoil
+    - Tutankham
+    - WizardOfWor
+    - YarsRevenge
+    - Zaxxon
+
+  platformer:
+    - Asterix
+    - CrazyClimber
+    - DonkeyKong
+    - ElevatorAction
+    - Frostbite
+    - Kangaroo
+    - KeystoneKapers
+    - KingKong
+    - KungFuMaster
+    - MarioBros
+    - MontezumaRevenge
+    - MrDo
+    - Pitfall
+    - Pitfall2
+    - Qbert
+    - RoadRunner
+
+  maze:
+    - Amidar
+    - Entombed
+    - MsPacman
+    - Pacman
+
+  sports:
+    - Bowling
+    - Boxing
+    - DoubleDunk
+    - FishingDerby
+    - HumanCannonball
+    - IceHockey
+    - MiniatureGolf
+    - Skiing
+    - Tennis
+
+  racing:
+    - Enduro
+    - UpNDown
+
+  adventure:
+    - Adventure
+    - Darkchambers
+    - Earthworld
+    - Et
+    - HauntedHouse
+    - Hero
+    - Krull
+    - PrivateEye
+    - Superman
+    - Venture
+
+  board_card:
+    - Backgammon
+    - Blackjack
+    - Casino
+    - Othello
+    - TicTacToe3D
+    - VideoCheckers
+    - VideoChess
+    - Surround
+
+  puzzle:
+    - BasicMath
+    - FlagCapture
+    - Hangman
+    - Klax
+    - Tetris
+    - VideoCube
+    - WordZapper
+
+  paddle:
+    - Breakout
+    - Kaboom
+    - Pong
+    - VideoPinball
+
+  action_misc:
+    - BankHeist
+    - Freeway
+    - Frogger
+    - Gopher
+    - JourneyEscape
+    - Koolaid
+    - LostLuggage
+    - Trondead
+
+# Note: Each game appears in exactly one primary category above.
