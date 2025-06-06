@@ -114,10 +114,19 @@ def read_npz_dataset(folder: str):
 
 
 @torch.no_grad()
-def load_dataset_to_gpu(folder: str):
-    """Load dataset and convert all arrays to GPU tensors."""
+def load_dataset_to_gpu(folder: str, *, batch_size: int = 2048):
+    """Load dataset and convert all arrays to GPU tensors.
+
+    Parameters
+    ----------
+    folder:
+        Path to the directory containing ``.npz`` shards.
+    batch_size:
+        Number of frames processed at once when converting them to VQ-VAE
+        indices. Reducing this value lowers peak GPU memory usage.
+    """
     frames, actions, rewards, dones = read_npz_dataset(folder)
-    ids = frames_to_indices(frames, vqvae)
+    ids = frames_to_indices(frames, vqvae, batch_size=batch_size)
     return (
         torch.tensor(ids, device=TORCH_DEVICE),
         torch.tensor(actions, device=TORCH_DEVICE),
