@@ -37,7 +37,7 @@ from .models.world_model import (
     WorldModel,
     ActorNetwork,
     CriticNetwork,
-    ReplayBuffer,
+    Replay,
 )
 
 __all__ = [
@@ -46,7 +46,7 @@ __all__ = [
     "WorldModel",
     "ActorNetwork",
     "CriticNetwork",
-    "ReplayBuffer",
+    "Replay",
     "VQVAE",
     "H16",
     "W16",

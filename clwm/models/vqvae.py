@@ -14,7 +14,7 @@ EMA = 0.9  # decay for the EMA in VectorQuantize
 
 # --------- tiny CNN encoder/decoder ---
 class Encoder(nn.Module):
-    """Tiny CNN encoder used by the VQ‑VAE."""
+    """Tiny CNN encoder used by the VQ-VAE."""
 
     def __init__(self) -> None:
         super().__init__()

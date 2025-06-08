@@ -13,7 +13,7 @@ from clwm.models.world_model import (
     WorldModel,
     ActorNetwork,
     CriticNetwork,
-    ReplayBuffer,
+    Replay,
 )
 from clwm.utils import (
     TORCH_DEVICE,
@@ -27,12 +27,7 @@ from clwm.utils.evaluation_utils import (
     evaluate_on_sequences,
     evaluate_policy,
 )
-from clwm.data import (
-    load_dataset_to_gpu,
-    fill_replay_buffer,
-    gather_offline_dataset,
-    gather_datasets_parallel,
-)
+
 
 # Global random seed will be set later (after CLI parse) to allow reproducible
 # held-out game selection.
@@ -66,7 +61,7 @@ def train_on_task(
     wm: WorldModel,
     actor: ActorNetwork,
     critic: CriticNetwork,
-    replay: ReplayBuffer,
+    replay: Replay,
     global_buffer,
     *,
     epochs: int = 6,
@@ -80,6 +75,8 @@ def train_on_task(
     decay: float = 0.99,
     running_weights=None,
     running_fisher=None,
+    online_steps: int = 256,
+    num_envs: int = 16,
 ):
     """Train world model and actor/critic on one game."""
     opt_wm = Adam(wm.parameters(), 1e-4)
@@ -90,6 +87,24 @@ def train_on_task(
 
     pbar = tqdm(total=epochs, desc=f"Learning {game}")
     while len(loss_history) < epochs:
+
+        # -------------------------------------------------------------
+        # 1) Collect fresh experience from the live environment to keep the
+        #    replay buffer up-to-date with the agent's continually improving
+        #    policy.  This step runs on the CPU but leverages asynchronous
+        #    vector environments and GPU-based VQ-VAE encoding to remove the
+        #    previous frame-processing bottleneck.
+        # -------------------------------------------------------------
+
+        replay.fill(
+            game,
+            wm,
+            actor,
+            global_buffer,
+            steps=online_steps,
+            ctx=ctx,
+            num_envs=num_envs,
+        )
 
         BATCH_SIZE = 64
 
@@ -281,7 +296,13 @@ if __name__ == "__main__":
     # that held-out game selection is deterministic w.r.t. the provided seed.
     set_global_seed(args.seed)
 
-    base_dir = cfg["dataset"]["base_dir"]
+    # The original implementation relied on pre-generated offline datasets and
+    # therefore expected a *dataset* section in the configuration file.  For
+    # the new purely online variant this section is optional – we keep the
+    # lookup but fall back to *None* when the key is absent so that users can
+    # provide much leaner configs.
+
+    base_dir = cfg.get("dataset", {}).get("base_dir", None)
 
     dim = cfg["model"]["dim"]
     wm = WorldModel(
@@ -339,39 +360,26 @@ if __name__ == "__main__":
 
     losses = []
 
-    missing = [
-        game
-        for game in TASKS
-        if not list((Path(base_dir) / game).glob("*.npz"))
-    ]
-
-    if missing:
-        gather_datasets_parallel(
-            missing,
-            cfg["dataset"]["collect_steps"],
-            base_dir,
-            reso=cfg["dataset"].get("reso", 84),
-            shard=cfg["dataset"].get("shard", 1000),
-        )
-
     for idx, game in enumerate(TASKS):
-        game_dir = Path(base_dir) / game
+        # ------------------------------------------------------------------
+        # For purely *online* training we start with an empty replay buffer and
+        # immediately collect an initial batch of random experience so that
+        # the world-model has data to learn from during the first optimisation
+        # step.
+        # ------------------------------------------------------------------
 
-        frames_t, actions_t, rewards_t, dones_t = load_dataset_to_gpu(
-            str(game_dir),
-            batch_size=cfg["dataset"].get("load_bs", 4096),
-        )
-
-        replay = ReplayBuffer(30000)
+        replay = Replay(30000)
         global_buffer = []
-        fill_replay_buffer(
-            frames_t,
-            actions_t,
-            rewards_t,
-            dones_t,
-            replay,
+
+        # Prefill buffer with on-policy experience.
+        replay.fill(
+            game,
+            wm,
+            actor,
+            global_buffer,
+            steps=cfg["training"].get("prefill_steps", 1024),
             ctx=cfg["training"]["ctx"],
-            global_buffer=global_buffer,
+            num_envs=cfg["training"].get("collector_envs", 16),
         )
 
         if idx > 0 and game not in seen:
@@ -394,6 +402,8 @@ if __name__ == "__main__":
             lam=cfg["training"].get("lam", 0.1),
             running_weights=running_weights,
             running_fisher=running_fisher,
+            online_steps=cfg["training"].get("online_steps", 256),
+            num_envs=cfg["training"].get("collector_envs", 16),
         )
 
         losses.append(loss)
@@ -408,7 +418,7 @@ if __name__ == "__main__":
             print(f"Score {_eval_game}: {score}")
 
         gamma = 0.9
-        k = min(256, len(replay.b))
+        k = min(256, replay.get_buffer_size())
 
         if k == 0:
             continue
