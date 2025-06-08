@@ -3,9 +3,10 @@ import torch
 from pathlib import Path
 import gymnasium as gym
 from stable_baselines3 import PPO
-
-from ..env.atari_envs import make_atari_env, make_atari_vectorized_envs
 from tqdm import tqdm
+from ..env.atari_envs import make_atari_env, make_atari_vectorized_envs
+from ..models.vqvae_utils import frames_to_indices, vqvae
+from ..utils.common import TORCH_DEVICE, ACTION_ID_START, PAD_TOKEN
 
 
 def gather_offline_dataset(
@@ -188,10 +189,6 @@ def gather_datasets_parallel(
 
     envs.close()
     print("✓ Datasets collected")
-
-
-from ..utils.common import TORCH_DEVICE, ACTION_ID_START, PAD_TOKEN
-from ..models.vqvae_utils import frames_to_indices, vqvae
 
 
 def read_npz_dataset(folder: str):
