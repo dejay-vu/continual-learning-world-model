@@ -107,19 +107,13 @@ class Trainer:
     # ------------------------------------------------------------------
 
     def _derive_tasks(self):
-        """Return (train_tasks, eval_tasks) from CLI flags.
-
-        The YAML configuration specifies only *default* tasks.  Users may
-        overwrite them from the command-line via ``--categories`` and
-        ``--zero-shot``.  The helper ensures both values are always lists and
-        falls back to reasonable defaults when a flag is missing.
-        """
-
         # CLI dictionary is always present (see Config.from_cli)
         cli = self.cli_args
 
+        import random
+
         train_flags: list[str] = cli.get("categories", []) or []
-        eval_flags: list[str] = cli.get("zero_shot", []) or []
+        zero_shot: bool = bool(cli.get("zero_shot", False))
 
         if not train_flags:
             raise ValueError(
@@ -133,21 +127,39 @@ class Trainer:
 
         cat_map: dict[str, list[str]] = cat_cfg.get("categories", {})
 
+        # Validate that every CLI token refers to a *known* category --------
+        unknown = [tok for tok in train_flags if tok not in cat_map]
+        if unknown:
+            avail = ", ".join(sorted(cat_map))
+            raise ValueError(
+                "Unknown --categories value(s): "
+                + ", ".join(unknown)
+                + f". Allowed categories: {avail}"
+            )
+
+        # Flatten selected categories into a list of games ------------------
         def _expand(flags: list[str]):
             games: list[str] = []
             for token in flags:
-                if token in cat_map:
-                    games.extend(cat_map[token])
-                else:
-                    games.append(token)  # treat as explicit game name
+                games.extend(cat_map[token])
             return games
 
         train_tasks = _expand(train_flags)
-        eval_tasks = _expand(eval_flags)
 
-        # When no explicit zero-shot list is given evaluate on train tasks.
-        if not eval_tasks:
-            eval_tasks = train_tasks.copy()
+        # Pick **one** random game for evaluation ---------------------
+        if len(train_tasks) == 0:
+            raise ValueError(
+                "Expanded training task list is empty – cannot select evaluation game"
+            )
+
+        eval_game = random.choice(train_tasks)
+
+        if zero_shot:
+            # Remove the held-out game from the training list so that it is
+            # never seen during optimisation.
+            train_tasks = [g for g in train_tasks if g != eval_game]
+
+        eval_tasks = [eval_game]
 
         return train_tasks, eval_tasks
 

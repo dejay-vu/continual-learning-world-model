@@ -121,15 +121,14 @@ class Config(_ConfigView):
             type=str,
             nargs="+",
             default=[],
-            help="Atari game categories to *train* on.",
+            help="List of *category* names defined in atari.yaml to train on.",
         )
 
         parser.add_argument(
             "--zero-shot",
-            type=str,
-            nargs="+",
-            default=[],
-            help="Extra games used *only* for evaluation (never trained).",
+            action="store_true",
+            help="When set, hold out one random game from the training "
+            "categories for zero-shot evaluation.",
         )
 
         parser.add_argument(
@@ -139,11 +138,68 @@ class Config(_ConfigView):
             help="Global RNG seed (torch / numpy / python).",
         )
 
+        parser.add_argument(
+            "--size",
+            type=str,
+            default=None,
+            help=(
+                "Model size preset to use – one of the keys defined under "
+                "model.size in the YAML configuration (e.g. 1m, 5m, 20m)."
+            ),
+        )
+
         args = parser.parse_args()
         cfg = cls.from_yaml(args.config)
 
         # Expose CLI flags under a dedicated namespace -----------------
         cfg._data["cli"] = vars(args)  # type: ignore[attr-defined]
+
+        # ------------------------------------------------------------------
+        # Apply *size* preset ----------------------------------------------
+        # ------------------------------------------------------------------
+        # The YAML file contains a mapping ``model.size`` that holds
+        # parameter presets keyed by an approximate *parameter count* label
+        # ("1m", "5m", …).  When the user passes ``--size`` we merge the
+        # corresponding dictionary into the *active* model configuration so
+        # that downstream code can treat the values just like any other
+        # manually specified ``dim / layers / heads`` trio.
+
+        model_cfg: dict[str, Any] = cfg._data.setdefault("model", {})  # type: ignore[attr-defined]
+
+        size_presets: dict[str, Any] = {
+            k.lower(): v for k, v in model_cfg.get("size", {}).items()
+        }
+
+        # The YAML may define a *default* size label (``model.default``).
+        default_label: str | None = model_cfg.get("default")
+
+        # Determine the requested size label (CLI overrides YAML default).
+        requested_label: str | None = (
+            args.size.lower()
+            if args.size
+            else (
+                default_label.lower()
+                if isinstance(default_label, str)
+                else None
+            )
+        )
+
+        if requested_label is not None:
+            if requested_label not in size_presets:
+                avail = ", ".join(sorted(size_presets))
+                raise ValueError(
+                    f"Unknown model size '{requested_label}'. Available: {avail}"
+                )
+
+            # Merge (do not *replace*) so that explicit overrides – either
+            # from the YAML file itself or via *future* dedicated CLI flags –
+            # still take precedence.
+            for k, v in size_presets[requested_label].items():
+                model_cfg.setdefault(k, v)
+
+            # Keep a record of the chosen label for logging/debugging.
+            model_cfg.setdefault("size_label", requested_label)
+
         return cfg, args
 
     # Internal helpers -------------------------------------------------
@@ -154,6 +210,10 @@ class Config(_ConfigView):
 
         # Merge hard-coded *training* defaults -------------------------
         cfg.setdefault("training", {}).update(
-            {k: v for k, v in _TRAINING_DEFAULTS.items() if k not in cfg.get("training", {})}
+            {
+                k: v
+                for k, v in _TRAINING_DEFAULTS.items()
+                if k not in cfg.get("training", {})
+            }
         )
         return cfg
