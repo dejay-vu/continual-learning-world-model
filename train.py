@@ -3,6 +3,18 @@ import random
 from typing import List
 
 import torch
+
+# Abort early if CUDA device is unavailable *before* pulling in any heavy
+# training-specific dependencies.  This keeps the startup overhead minimal on
+# unsupported machines and provides clear feedback to the user.
+
+if not torch.cuda.is_available():
+    raise SystemExit(
+        "CUDA device not available – training requires a GPU. "
+        "Please run this script on a machine with an NVIDIA GPU and a "
+        "working CUDA installation."
+    )
+
 from torch.optim import Adam
 from tqdm import tqdm
 import argparse
@@ -17,8 +29,9 @@ from clwm.models.world_model import (
 )
 
 # ---------------- Mixed-precision helpers -----------------------------
-import contextlib
 from torch.amp import autocast, GradScaler
+
+# Utility functions and constants
 from clwm.utils import (
     TORCH_DEVICE,
     encode_two_hot,
@@ -87,7 +100,7 @@ def train_on_task(
     opt_act = Adam(actor.parameters(), 4e-4)
     opt_cri = Adam(critic.parameters(), 4e-4)
 
-    scaler = GradScaler(device="cuda", enabled=(TORCH_DEVICE == "cuda"))
+    scaler = GradScaler(device="cuda", enabled=True)
 
     loss_history = []
 
@@ -126,11 +139,7 @@ def train_on_task(
     # ------------------------------------------------------------------
     # Data pre-fetching & double buffering (asynchronous H2D copy)
     # ------------------------------------------------------------------
-    copy_stream = (
-        torch.cuda.Stream(device=torch.cuda.current_device())
-        if TORCH_DEVICE == "cuda"
-        else None
-    )
+    copy_stream = torch.cuda.Stream(device=torch.cuda.current_device())
 
     BATCH_SIZE = 128
 
@@ -150,19 +159,14 @@ def train_on_task(
             x[1] for x in global_samples
         ]
 
-        batch_cpu = torch.stack(sequences)
-        if TORCH_DEVICE == "cuda":
-            batch_cpu = batch_cpu.pin_memory()
+        batch_cpu = torch.stack(sequences).pin_memory()
         return batch_cpu, sample_rewards
 
     # Prefetch FIRST batch so that `batch_gpu` is initialised.
     batch_cpu, rewards = _sample_batch()
-    if TORCH_DEVICE == "cuda":
-        with torch.cuda.stream(copy_stream):
-            batch_gpu = batch_cpu.to(TORCH_DEVICE, non_blocking=True)
-        torch.cuda.current_stream().wait_stream(copy_stream)
-    else:
-        batch_gpu = batch_cpu
+    with torch.cuda.stream(copy_stream):
+        batch_gpu = batch_cpu.to(TORCH_DEVICE, non_blocking=True)
+    torch.cuda.current_stream().wait_stream(copy_stream)
 
     reward_env_tensor = torch.tensor(
         rewards, dtype=torch.float16, device=TORCH_DEVICE
@@ -179,13 +183,8 @@ def train_on_task(
 
         next_batch_cpu, next_rewards = _sample_batch()
 
-        if TORCH_DEVICE == "cuda":
-            with torch.cuda.stream(copy_stream):
-                next_batch_gpu = next_batch_cpu.to(
-                    TORCH_DEVICE, non_blocking=True
-                )
-        else:
-            next_batch_gpu = next_batch_cpu
+        with torch.cuda.stream(copy_stream):
+            next_batch_gpu = next_batch_cpu.to(TORCH_DEVICE, non_blocking=True)
 
         # -------------------------------------------------------------
         #  GPU forward/backward on the *current* batch ----------------
@@ -199,11 +198,7 @@ def train_on_task(
         tgt = batch[:, 1:].reshape(B, -1)
 
         # ----- forward pass under mixed precision -------------------
-        with (
-            autocast(device_type="cuda", dtype=torch.float16)
-            if TORCH_DEVICE == "cuda"
-            else contextlib.nullcontext()
-        ):
+        with autocast(device_type="cuda", dtype=torch.float16):
             logits, kl, h = wm(inp, return_ent=True, return_reward=True)
 
         ce_img, ce_act = split_cross_entropy(logits, tgt)
@@ -311,24 +306,17 @@ def train_on_task(
         opt_act.zero_grad()
         opt_cri.zero_grad()
 
-        if TORCH_DEVICE == "cuda":
-            scaler.scale(loss).backward()
-            # Gradient clipping requires unscaled grads
-            scaler.unscale_(opt_wm)
-            scaler.unscale_(opt_act)
-            scaler.unscale_(opt_cri)
-            torch.nn.utils.clip_grad_norm_(wm.parameters(), 5.0)
+        scaler.scale(loss).backward()
+        # Gradient clipping requires unscaled grads
+        scaler.unscale_(opt_wm)
+        scaler.unscale_(opt_act)
+        scaler.unscale_(opt_cri)
+        torch.nn.utils.clip_grad_norm_(wm.parameters(), 5.0)
 
-            scaler.step(opt_wm)
-            scaler.step(opt_act)
-            scaler.step(opt_cri)
-            scaler.update()
-        else:
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(wm.parameters(), 5.0)
-            opt_wm.step()
-            opt_act.step()
-            opt_cri.step()
+        scaler.step(opt_wm)
+        scaler.step(opt_act)
+        scaler.step(opt_cri)
+        scaler.update()
 
         for b in wm.blocks:
             b.tau.mul_(0.90).clamp_(min=0.02)
@@ -354,8 +342,7 @@ def train_on_task(
         # buffers.
         # -------------------------------------------------------------
 
-        if TORCH_DEVICE == "cuda":
-            torch.cuda.current_stream().wait_stream(copy_stream)
+        torch.cuda.current_stream().wait_stream(copy_stream)
 
         batch_gpu = next_batch_gpu  # promote pre-fetched batch
         reward_env_tensor = torch.tensor(
