@@ -63,6 +63,25 @@ class _ConfigView:
     def __repr__(self) -> str:
         return f"ConfigView({self._data!r})"
 
+    # -----------------------------------------------------------------
+    # Public helpers ---------------------------------------------------
+    # -----------------------------------------------------------------
+
+    def to_dict(self) -> dict[str, Any]:  # noqa: D401 – explicit accessor
+        """Return the **raw** underlying mapping.
+
+        The training entry-point expects a *plain* ``dict`` so that it can be
+        unpacked directly into the :class:`clwm.Trainer` constructor via the
+        ``**`` syntax.  Exposing the internal representation avoids an extra
+        ``yaml.safe_dump/load`` round-trip and keeps backwards-compatibility
+        with earlier versions of the code base where :class:`Config` was just
+        a thin ``dict`` wrapper.
+        """
+
+        # ``_data`` already contains regular Python containers – return a
+        # shallow copy to prevent accidental mutations of the internal state.
+        return dict(self._data)
+
 
 # -------------------------------------------------------------------------
 # Public Config class -----------------------------------------------------
