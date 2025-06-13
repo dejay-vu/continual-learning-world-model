@@ -165,7 +165,7 @@ def train_on_task(
 
         # ----- forward pass under mixed precision -------------------
         with (
-            autocast(device_type="cuda", dtype=torch.float32)
+            autocast(device_type="cuda", dtype=torch.float16)
             if TORCH_DEVICE == "cuda"
             else contextlib.nullcontext()
         ):

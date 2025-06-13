@@ -5,9 +5,9 @@ model:
 
 training:
   epochs: 10
-  ctx: 128
+  ctx: 64
   imag_h: 15
   gamma: 0.99
   lam_return: 0.95
   lam: 0.1
-  online_steps: 128
+  online_steps: 1024
