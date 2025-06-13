@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 from safetensors.torch import load_file
 from .vqvae import VQVAE, RES, D_LAT
-from ..utils.common import TORCH_DEVICE, VQVAE_CHECKPOINT
+from ..common import TORCH_DEVICE, VQVAE_CHECKPOINT
 
 _VQVAE_SINGLETON: VQVAE | None = None
 

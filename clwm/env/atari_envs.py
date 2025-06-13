@@ -1,7 +1,7 @@
 import gymnasium as gym
 from gymnasium.wrappers import TransformReward
 import ale_py
-from ..utils.common import symlog
+from ..common import symlog
 
 gym.register_envs(ale_py)
 

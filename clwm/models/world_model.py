@@ -3,14 +3,17 @@ import random
 from collections import deque
 from typing import Iterable, Tuple, List
 
+import numpy as np
 import torch
 from torch import nn
+import torch.utils.checkpoint as ckpt
 
-import numpy as np
 import gymnasium as gym
 
-from .flash_attention import FlashAttentionBlock
-from ..utils.common import (
+from ..env.atari_envs import make_atari_vectorized_envs
+# Project-local helpers --------------------------------------------------
+from ..concurrency import StreamManager
+from ..common import (
     MAX_ACTIONS,
     VOCAB_SIZE,
     REWARD_BINS,
@@ -20,26 +23,45 @@ from ..utils.common import (
     PAD_TOKEN,
 )
 
-from ..env.atari_envs import make_atari_vectorized_envs
+from .flash_attention import FlashAttentionBlock
 from .vqvae_utils import frames_to_indices, vqvae
 
 
 class Replay:
-    """Experience replay buffer with integrated collection helper.
+    """Experience replay buffer with two sampling scopes.
 
-    The class combines the original *ReplayBuffer* container with the
-    *fill_replay_buffer* utility so that downstream code can simply call
+    The class stores *current-task* transitions in an **instance-local**
+    bounded deque *and* keeps an **all-tasks** rehearsal memory that is
+    shared across *all* instances.
 
-        >>> replay = Replay(capacity)
-        >>> replay.fill(game, wm, actor, ...)
+    Sampling helpers allow callers to draw exclusively from the current task
+    (``sample_current``), from the shared rehearsal memory
+    (``sample_global``) or from a mixture of both pools
+    (``sample_mixed``).
 
-    to gather fresh experience from the environment and push it directly into
-    the buffer.
+    Example
+    -------
+    >>> replay = Replay(capacity=30_000)
+    >>> replay.fill("Breakout", wm, actor)   # populates both pools
+    >>> batch = replay.sample_mixed(128, ratio=0.2)  # 80/20 split
     """
 
+    # ------------------------------------------------------------------
+    # Shared rehearsal memory (class attribute, persists across tasks)
+    # ------------------------------------------------------------------
+
+    _GLOBAL_CAPACITY = 100_000  # hard cap on the cross-task memory size
+    _global_buffer: deque[Tuple[torch.Tensor, float]] | None = None
+
     def __init__(self, cap: int) -> None:
-        # Internal storage is a bounded deque of (sequence, reward) tuples
+        """Create a *task-local* replay buffer with capacity *cap*."""
+
+        # Instance-local storage for the *current* task only.
         self._buffer: deque[Tuple[torch.Tensor, float]] = deque(maxlen=cap)
+
+        # Lazily initialise the **shared** rehearsal memory once.
+        if Replay._global_buffer is None:
+            Replay._global_buffer = deque(maxlen=Replay._GLOBAL_CAPACITY)
 
         # Separate CUDA stream for auxiliary GPU work (e.g. VQ-VAE encoding).
         # Using a dedicated stream allows replay collection – which runs in a
@@ -48,14 +70,10 @@ class Replay:
         # when a CUDA device is available so that CPU-only execution remains
         # unaffected.
 
-        import torch  # local import to avoid CUDA context on CPU machines
-
         if torch.cuda.is_available():
-            self._encode_stream = torch.cuda.Stream(
-                device=torch.cuda.current_device()
-            )
+            self._encode_mgr = StreamManager()
         else:
-            self._encode_stream = None
+            self._encode_mgr = None
 
     # ------------------------------------------------------------------
     # Basic container operations
@@ -67,14 +85,97 @@ class Replay:
         return len(self._buffer)
 
     def add(self, seq: torch.Tensor, reward: float) -> None:
-        """Append one transition sequence to the buffer."""
+        """Append a transition to the *current* buffer **and** the rehearsal memory."""
 
         self._buffer.append((seq, reward))
 
-    def sample(self, k: int) -> Iterable[Tuple[torch.Tensor, float]]:
-        """Return *k* random samples (without replacement)."""
+        # Push into the shared rehearsal store as well.
+        if Replay._global_buffer is not None:
+            Replay._global_buffer.append((seq, reward))
+
+    # ------------------------------------------------------------------
+    # Sampling helpers
+    # ------------------------------------------------------------------
+
+    def sample(self, k: int) -> list[Tuple[torch.Tensor, float]]:
+        """Return *k* random samples from the *current-task* buffer."""
 
         return random.sample(self._buffer, min(k, len(self._buffer)))
+
+    def sample_current(self, k: int) -> list[Tuple[torch.Tensor, float]]:
+        """Alias for :py:meth:`sample` (kept for readability)."""
+
+        return self.sample(k)
+
+    @classmethod
+    def sample_global(cls, k: int) -> list[Tuple[torch.Tensor, float]]:
+        """Return *k* random samples from the shared rehearsal memory."""
+
+        if cls._global_buffer is None:
+            return []
+        return random.sample(
+            cls._global_buffer, min(k, len(cls._global_buffer))
+        )
+
+    def sample_mixed(
+        self,
+        k: int,
+        *,
+        ratio: float = 0.2,
+        min_global: int = 13,
+    ) -> list[Tuple[torch.Tensor, float]]:
+        """Return a mixture of current-task and rehearsal samples.
+
+        The method draws ``int(k * ratio)`` elements from the global buffer
+        (if it contains at least *min_global* transitions) and fills the
+        remainder with current-task samples.  If one of the pools holds fewer
+        elements than requested the other pool automatically tops up so that
+        the returned list contains exactly *k* samples (or fewer if **both**
+        buffers are empty).
+        """
+
+        num_global = (
+            int(k * ratio)
+            if (
+                Replay._global_buffer is not None
+                and len(Replay._global_buffer) >= min_global
+            )
+            else 0
+        )
+
+        num_current = k - num_global
+
+        samples: list[Tuple[torch.Tensor, float]] = []
+
+        if num_current > 0 and len(self._buffer) > 0:
+            samples.extend(
+                random.sample(
+                    self._buffer, min(num_current, len(self._buffer))
+                )
+            )
+
+        if num_global > 0 and Replay._global_buffer is not None:
+            samples.extend(
+                random.sample(
+                    Replay._global_buffer,
+                    min(num_global, len(Replay._global_buffer)),
+                )
+            )
+
+        # Top-up if one of the buffers had insufficient data.
+        shortfall = k - len(samples)
+        if shortfall > 0:
+            # Prefer current buffer first, then global.
+            if len(self._buffer) > len(Replay._global_buffer or []):
+                source = self._buffer
+            else:
+                source = Replay._global_buffer or self._buffer
+            if len(source) > 0:
+                samples.extend(
+                    random.sample(source, min(shortfall, len(source)))
+                )
+
+        return samples
 
     # ------------------------------------------------------------------
     # High-level data collection helper (previously *fill_replay_buffer*)
@@ -86,7 +187,6 @@ class Replay:
         game: str,
         wm,
         actor,
-        global_buffer: List | None = None,
         *,
         steps: int = 512,
         ctx: int = 64,
@@ -101,10 +201,6 @@ class Replay:
             Atari game name, e.g. "Breakout".
         wm, actor
             World-model and policy network used for action selection.
-        global_buffer : list | None
-            Optional list that stores a subset of transitions across tasks for
-            the EWC implementation.  The method appends the same structures as
-            *add* (tuples of (sequence, reward)).
         steps : int, default 512
             Number of *vectorised* environment steps.  The actual amount of
             data pushed to the buffer equals ``steps * num_envs``.
@@ -149,14 +245,14 @@ class Replay:
             # default stream used by the main training loop.
             # ------------------------------------------------------------------
 
-            if self._encode_stream is not None:
-                with torch.cuda.stream(self._encode_stream):
-                    ids_gpu = frames_to_indices(
-                        obs, vqvae, batch_size=256, device=TORCH_DEVICE
-                    )
-                # Make sure that subsequent ops (running on the default
-                # stream) see the completed result.
-                torch.cuda.current_stream().wait_stream(self._encode_stream)
+            if self._encode_mgr is not None:
+                ids_gpu = self._encode_mgr.run(
+                    frames_to_indices,
+                    obs,
+                    vqvae,
+                    batch_size=256,
+                    device=TORCH_DEVICE,
+                )
             else:
                 ids_gpu = frames_to_indices(
                     obs, vqvae, batch_size=256, device=TORCH_DEVICE
@@ -197,7 +293,6 @@ class Replay:
             rewards_np,
             dones_np,
             ctx=ctx,
-            global_buffer=global_buffer,
         )
 
         envs.close()
@@ -241,7 +336,6 @@ class Replay:
         dones: np.ndarray | torch.Tensor,
         *,
         ctx: int = 64,
-        global_buffer: List | None = None,
     ) -> None:
         """Vectorised construction of ctx-length sequences and storage.
 
@@ -298,8 +392,6 @@ class Replay:
             rew = float(rewards_np[t])
 
             self.add(seq, rew)
-            if global_buffer is not None:
-                global_buffer.append((seq, rew))
 
             # Mark start of new episode *after* storing transition t so that
             # the final frame of the episode is still included in ctx-windows.
@@ -336,8 +428,6 @@ class WorldModel(nn.Module):
     ):
         x = self.tok(seq)
         ent_sum = 0.0
-        import torch.utils.checkpoint as ckpt
-
         for i, b in enumerate(self.blocks):
             # Gradient-checkpoint every second block during training to lower
             # activation memory.  We keep evaluation untouched to avoid the

@@ -2,7 +2,8 @@
 
 from .models.flash_attention import FlashAttentionBlock
 from .models.lora_layer import LoRA
-from .utils.common import (
+# Public re-exports -------------------------------------------------------
+from .common import (
     ACTION_ID_START,
     REWARD_BINS,
     VQVAE_CHECKPOINT,
@@ -25,13 +26,13 @@ from .models.vqvae_utils import (
     frame_to_indices,
     frames_to_indices,
 )
-from .utils.training_utils import split_cross_entropy, fisher_diagonal
+
+# migrated to common
+# Additional math helpers ----------------------------------------------
+from .common import split_cross_entropy, fisher_diagonal
 from .env.atari_envs import make_atari_env, make_atari_vectorized_envs
-from .utils.evaluation_utils import (
-    build_evaluation_sequences,
-    evaluate_on_sequences,
-    evaluate_policy,
-)
+
+# (migrated to Trainer; thin wrappers added below)
 from .models.vqvae import VQVAE, H16, W16, K, RES, D_LAT
 from .models.world_model import (
     WorldModel,
@@ -62,9 +63,8 @@ __all__ = [
     "frame_to_indices",
     "frames_to_indices",
     "set_global_seed",
-    "build_evaluation_sequences",
-    "evaluate_on_sequences",
-    "evaluate_policy",
+    # evaluation helpers now live in Trainer but re-export for convenience
+# evaluation helpers now live in Trainer – removed from public namespace
     "expect_raw",
     "expect_symlog",
     "fisher_diagonal",
@@ -79,4 +79,15 @@ __all__ = [
     "vqvae",
     "get_vqvae",
     "REWARD_BINS",
+    # ----------------- new abstractions ----------------------------------
+    "Config",
+    "Trainer",
+    "AsyncExecutor",
+    "StreamManager",
 ]
+
+# Expose the *new* classes -------------------------------------------------
+
+from .config import Config  # noqa: E402 (import after __all__)
+from .trainer import Trainer  # noqa: E402
+from .concurrency import AsyncExecutor, StreamManager  # noqa: E402
