@@ -342,10 +342,9 @@ class WorldModel(nn.Module):
             # Gradient-checkpoint every second block during training to lower
             # activation memory.  We keep evaluation untouched to avoid the
             # runtime overhead when gradients are not required.
-            if self.training and (i % 2 == 0):
-                x, g = ckpt.checkpoint(b, x, use_reentrant=True)
-            else:
-                x, g = b(x)
+            if self.training:
+                x, g = ckpt.checkpoint(b, x, use_reentrant=False)
+
             if return_ent:
                 kl = (g * (g + 1e-8).log()).sum(-1) + math.log(g.size(-1))
                 ent_sum += kl

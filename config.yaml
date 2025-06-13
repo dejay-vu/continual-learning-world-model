@@ -11,3 +11,4 @@ training:
   lam_return: 0.95
   lam: 0.1
   online_steps: 4096
+  evaluation_interval: 10

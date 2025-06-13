@@ -10,7 +10,7 @@ import torch
 
 if not torch.cuda.is_available():
     raise SystemExit(
-        "CUDA device not available – training requires a GPU. "
+        "CUDA device not available - training requires a GPU. "
         "Please run this script on a machine with an NVIDIA GPU and a "
         "working CUDA installation."
     )
@@ -475,6 +475,9 @@ if __name__ == "__main__":
 
     losses = []
 
+    # Determine after how many trained tasks an evaluation should be run.
+    eval_interval = max(1, cfg["training"].get("evaluation_interval", 1))
+
     for idx, game in enumerate(TASKS):
         # ------------------------------------------------------------------
         # For purely *online* training we start with an empty replay buffer and
@@ -523,14 +526,20 @@ if __name__ == "__main__":
 
         losses.append(loss)
 
-        for _eval_game in eval_tasks:
-            seq_eval = build_evaluation_sequences(
-                wm, actor, _eval_game, ctx=32, n_seq=256
-            )
-            ce_eval = evaluate_on_sequences(wm, seq_eval)
-            print(f"Eval CE on {_eval_game}: {ce_eval:.4f}")
-            score = evaluate_policy(actor, wm, _eval_game)
-            print(f"Score {_eval_game}: {score}")
+        # -------------------------------------------------------------
+        # Run evaluation only every *eval_interval* tasks to speed up
+        # training when frequent evaluations are not required.
+        # -------------------------------------------------------------
+
+        if (idx + 1) % eval_interval == 0:
+            for _eval_game in eval_tasks:
+                seq_eval = build_evaluation_sequences(
+                    wm, actor, _eval_game, ctx=32, n_seq=256
+                )
+                ce_eval = evaluate_on_sequences(wm, seq_eval)
+                print(f"Eval CE on {_eval_game}: {ce_eval:.4f}")
+                score = evaluate_policy(actor, wm, _eval_game)
+                print(f"Score {_eval_game}: {score}")
 
         gamma = 0.9
         k = min(256, replay.get_buffer_size())
@@ -566,3 +575,19 @@ if __name__ == "__main__":
                 else:
                     running_fisher[i] = F_new
                     running_weights[i] = p.detach().cpu()
+
+    # -------------------------------------------------------------
+    # Final evaluation in case the total number of tasks is not an
+    # exact multiple of *eval_interval*.
+    # -------------------------------------------------------------
+
+    if (len(TASKS) % eval_interval) != 0:
+        print("Running final evaluation …")
+        for _eval_game in eval_tasks:
+            seq_eval = build_evaluation_sequences(
+                wm, actor, _eval_game, ctx=32, n_seq=256
+            )
+            ce_eval = evaluate_on_sequences(wm, seq_eval)
+            print(f"Final Eval CE on {_eval_game}: {ce_eval:.4f}")
+            score = evaluate_policy(actor, wm, _eval_game)
+            print(f"Final Score {_eval_game}: {score}")
