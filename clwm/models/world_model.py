@@ -41,6 +41,22 @@ class Replay:
         # Internal storage is a bounded deque of (sequence, reward) tuples
         self._buffer: deque[Tuple[torch.Tensor, float]] = deque(maxlen=cap)
 
+        # Separate CUDA stream for auxiliary GPU work (e.g. VQ-VAE encoding).
+        # Using a dedicated stream allows replay collection – which runs in a
+        # *background* thread – to overlap its GPU kernels and memory copies
+        # with the main training stream.  The extra stream is only created
+        # when a CUDA device is available so that CPU-only execution remains
+        # unaffected.
+
+        import torch  # local import to avoid CUDA context on CPU machines
+
+        if torch.cuda.is_available():
+            self._encode_stream = torch.cuda.Stream(
+                device=torch.cuda.current_device()
+            )
+        else:
+            self._encode_stream = None
+
     # ------------------------------------------------------------------
     # Basic container operations
     # ------------------------------------------------------------------
@@ -127,9 +143,24 @@ class Replay:
             # 1) VQ-VAE encoding of *current* observations only (≤ batch_size)
             #    The indices remain on the GPU so we can feed them directly to
             #    the policy network without an additional host→device copy.
-            ids_gpu = frames_to_indices(
-                obs, vqvae, batch_size=256, device=TORCH_DEVICE
-            )
+            # ------------------------------------------------------------------
+            # Encode observations → VQ-VAE codebook indices on the **dedicated**
+            # CUDA stream so that the kernels can run concurrently with the
+            # default stream used by the main training loop.
+            # ------------------------------------------------------------------
+
+            if self._encode_stream is not None:
+                with torch.cuda.stream(self._encode_stream):
+                    ids_gpu = frames_to_indices(
+                        obs, vqvae, batch_size=256, device=TORCH_DEVICE
+                    )
+                # Make sure that subsequent ops (running on the default
+                # stream) see the completed result.
+                torch.cuda.current_stream().wait_stream(self._encode_stream)
+            else:
+                ids_gpu = frames_to_indices(
+                    obs, vqvae, batch_size=256, device=TORCH_DEVICE
+                )
 
             # 2) Action selection (uses the on-device tokens)
             actions = self._select_actions(

@@ -79,7 +79,7 @@ def train_on_task(
     decay: float = 0.99,
     running_weights=None,
     running_fisher=None,
-    online_steps: int = 256,
+    online_steps: int = 1024,
     num_envs: int = 16,
 ):
     """Train world model and actor/critic on one game."""
@@ -93,50 +93,49 @@ def train_on_task(
 
     pbar = tqdm(total=epochs, desc=f"Learning {game}")
 
-    collect_thread = None  # background data-collection worker
+    # ------------------------------------------------------------------
+    # 0) Launch a *persistent* background collector that keeps the replay
+    #    buffer populated at all times.  By avoiding the blocking join() of
+    #    the previous implementation we let the GPU continue training while
+    #    new experience is being gathered on the CPU.
+    # ------------------------------------------------------------------
 
-    while len(loss_history) < epochs:
+    import threading
 
-        # -------------------------------------------------------------
-        # 1) Collect fresh experience from the live environment to keep the
-        #    replay buffer up-to-date with the agent's continually improving
-        #    policy.  This step runs on the CPU but leverages asynchronous
-        #    vector environments and GPU-based VQ-VAE encoding to remove the
-        #    previous frame-processing bottleneck.
-        # -------------------------------------------------------------
+    stop_event = threading.Event()
 
-        # -------------------------------------------------------------
-        # Optionally overlap data collection with GPU training by running
-        # the environment interaction in a *background* thread.  This hides
-        # at least part of the emulator latency and increases the effective
-        # GPU utilisation without touching the algebraic part of the model.
-        # -------------------------------------------------------------
+    def _collector_loop():
+        while not stop_event.is_set():
+            try:
+                replay.fill(
+                    game,
+                    wm,  # updated weights are visible across threads
+                    actor,
+                    global_buffer,
+                    steps=online_steps,
+                    ctx=ctx,
+                    num_envs=num_envs,
+                )
+            except Exception as e:
+                print("[collector]", e)
+                continue
 
-        # Wait for the previous collection cycle (if any) to finish so that
-        # we always have fresh data available in the buffer.  The wait is at
-        # the *beginning* of the loop which means that collection of the
-        # *next* batch runs in parallel with the *current* optimisation step.
-        if collect_thread is not None:
-            collect_thread.join()
+    collector_thread = threading.Thread(target=_collector_loop, daemon=True)
+    collector_thread.start()
 
-        import threading
+    # ------------------------------------------------------------------
+    # Data pre-fetching & double buffering (asynchronous H2D copy)
+    # ------------------------------------------------------------------
+    copy_stream = (
+        torch.cuda.Stream(device=torch.cuda.current_device())
+        if TORCH_DEVICE == "cuda"
+        else None
+    )
 
-        def _collector():
-            replay.fill(
-                game,
-                wm,
-                actor,
-                global_buffer,
-                steps=online_steps,
-                ctx=ctx,
-                num_envs=num_envs,
-            )
+    BATCH_SIZE = 128
 
-        # Launch async collection for the *next* iteration.
-        collect_thread = threading.Thread(target=_collector, daemon=True)
-        collect_thread.start()
-
-        BATCH_SIZE = 128
+    def _sample_batch():
+        """Sample and *pin* a batch on the host."""
 
         current_samples = replay.sample(int(0.8 * BATCH_SIZE))
         global_samples = (
@@ -154,10 +153,46 @@ def train_on_task(
         batch_cpu = torch.stack(sequences)
         if TORCH_DEVICE == "cuda":
             batch_cpu = batch_cpu.pin_memory()
-        batch = batch_cpu.to(TORCH_DEVICE, non_blocking=True)  # (B, ctx, 26)
-        reward_env = torch.tensor(
-            sample_rewards, dtype=torch.float16, device=TORCH_DEVICE
-        )  # (B,)
+        return batch_cpu, sample_rewards
+
+    # Prefetch FIRST batch so that `batch_gpu` is initialised.
+    batch_cpu, rewards = _sample_batch()
+    if TORCH_DEVICE == "cuda":
+        with torch.cuda.stream(copy_stream):
+            batch_gpu = batch_cpu.to(TORCH_DEVICE, non_blocking=True)
+        torch.cuda.current_stream().wait_stream(copy_stream)
+    else:
+        batch_gpu = batch_cpu
+
+    reward_env_tensor = torch.tensor(
+        rewards, dtype=torch.float16, device=TORCH_DEVICE
+    )
+
+    while len(loss_history) < epochs:
+
+        # -------------------------------------------------------------
+        # Kick off *asynchronous* host→device copy for the NEXT batch while
+        # computing the current one.  This hides the transfer latency behind
+        # useful compute on the GPU and therefore increases overall
+        # utilisation.
+        # -------------------------------------------------------------
+
+        next_batch_cpu, next_rewards = _sample_batch()
+
+        if TORCH_DEVICE == "cuda":
+            with torch.cuda.stream(copy_stream):
+                next_batch_gpu = next_batch_cpu.to(
+                    TORCH_DEVICE, non_blocking=True
+                )
+        else:
+            next_batch_gpu = next_batch_cpu
+
+        # -------------------------------------------------------------
+        #  GPU forward/backward on the *current* batch ----------------
+        # -------------------------------------------------------------
+
+        batch = batch_gpu  # already on device
+        reward_env = reward_env_tensor  # on device
 
         B, _, _ = batch.shape
         inp = batch[:, :-1].reshape(B, -1)
@@ -313,12 +348,25 @@ def train_on_task(
         )
         pbar.update(1)
 
+        # -------------------------------------------------------------
+        # *Synchronise* with the copy stream so that the next batch is fully
+        # on the device before the next iteration begins, then swap the
+        # buffers.
+        # -------------------------------------------------------------
+
+        if TORCH_DEVICE == "cuda":
+            torch.cuda.current_stream().wait_stream(copy_stream)
+
+        batch_gpu = next_batch_gpu  # promote pre-fetched batch
+        reward_env_tensor = torch.tensor(
+            next_rewards, dtype=torch.float16, device=TORCH_DEVICE
+        )
+
     pbar.close()
 
-    # Ensure the final background collection finishes before we leave the
-    # function and potentially destroy the replay buffer.
-    if "collect_thread" in locals() and collect_thread is not None:
-        collect_thread.join()
+    # Stop collector thread gracefully.
+    stop_event.set()
+    collector_thread.join()
 
     return ce
 
