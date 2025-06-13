@@ -14,8 +14,8 @@ model:
 
 training:
   epochs: 20
-  ctx: 64
-  imag_h: 15
+  context_length: 64
+  imagination_horizon: 15
   gamma: 0.99
   lam_return: 0.95
   lam: 0.1
@@ -34,4 +34,4 @@ training:
   # memory when creating a batch via ``Replay.sample_mixed``.
   sample_ratio: 0.2
 
-  evaluation_interval: 10
+  evaluation_interval: 1

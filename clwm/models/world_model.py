@@ -11,6 +11,7 @@ import torch.utils.checkpoint as ckpt
 import gymnasium as gym
 
 from ..env.atari_envs import make_atari_vectorized_envs
+
 # Project-local helpers --------------------------------------------------
 from ..concurrency import StreamManager
 from ..common import (
@@ -189,7 +190,7 @@ class Replay:
         actor,
         *,
         steps: int = 512,
-        ctx: int = 64,
+        context_length: int = 64,
         num_envs: int = 16,
         eps: float = 0.05,
     ) -> None:
@@ -204,7 +205,7 @@ class Replay:
         steps : int, default 512
             Number of *vectorised* environment steps.  The actual amount of
             data pushed to the buffer equals ``steps * num_envs``.
-        ctx : int, default 64
+        context_length : int, default 64
             Context length used when constructing token sequences.
         num_envs : int, default 16
             Number of parallel emulator instances (affects CPU throughput).
@@ -292,7 +293,7 @@ class Replay:
             actions_np,
             rewards_np,
             dones_np,
-            ctx=ctx,
+            context_length=context_length,
         )
 
         envs.close()
@@ -337,9 +338,9 @@ class Replay:
         rewards: np.ndarray | torch.Tensor,
         dones: np.ndarray | torch.Tensor,
         *,
-        ctx: int = 64,
+        context_length: int = 64,
     ) -> None:
-        """Vectorised construction of ctx-length sequences and storage.
+        """Vectorised construction of context_length sequences and storage.
 
         Parameters are expected on the *CPU*.  Only the final concatenated
         sequence is moved to ``TORCH_DEVICE`` right before being stored so
@@ -369,10 +370,10 @@ class Replay:
         episode_start = 0  # index of first step in current episode
 
         for t in range(len(frames)):
-            # Determine slice for the last ≤ctx steps within current episode
+            # Determine slice for the last ≤context_length steps within current episode
             # (episode boundary handled after storing the transition)
 
-            s = max(episode_start, t - ctx + 1)
+            s = max(episode_start, t - context_length + 1)
             idx = slice(s, t + 1)
 
             # Build (len, N_PATCH+1) tensor : [frame_tokens ‖ action_token]
@@ -382,9 +383,9 @@ class Replay:
             ).unsqueeze(1)
             seq = torch.cat((seq_frames, seq_actions), 1)
 
-            # Left-pad if episode length < ctx
-            if seq.size(0) < ctx:
-                pad_needed = ctx - seq.size(0)
+            # Left-pad if episode length < context_length
+            if seq.size(0) < context_length:
+                pad_needed = context_length - seq.size(0)
                 pad = pad_row.unsqueeze(0).expand(pad_needed, -1)
                 seq = torch.cat((pad, seq), 0)
 
@@ -396,7 +397,7 @@ class Replay:
             self.add(seq, rew)
 
             # Mark start of new episode *after* storing transition t so that
-            # the final frame of the episode is still included in ctx-windows.
+            # the final frame of the episode is still included in context_length-windows.
             if dones_np[t]:
                 episode_start = t + 1
 
@@ -404,14 +405,13 @@ class Replay:
 class WorldModel(nn.Module):
     """Transformer world model predicting tokens and rewards."""
 
-    def __init__(self, dim: int = 256, layers: int = 6, heads: int = 8) -> None:
+    def __init__(
+        self, dim: int = 256, layers: int = 6, heads: int = 8
+    ) -> None:
         super().__init__()
         self.tok = nn.Embedding(VOCAB_SIZE, dim)
         self.blocks = nn.ModuleList(
-            [
-                FlashAttentionBlock(dim=dim, heads=heads)
-                for _ in range(layers)
-            ]
+            [FlashAttentionBlock(dim=dim, heads=heads) for _ in range(layers)]
         )
         self.ln = nn.LayerNorm(dim)
         self.head = nn.Linear(dim, VOCAB_SIZE, bias=False)

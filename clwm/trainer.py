@@ -177,7 +177,7 @@ class Trainer:
         """Generate rollouts using the *current* policy network."""
 
         cfg = self.training_cfg
-        context_length = cfg["ctx"]
+        context_length = cfg["context_length"]
 
         seqs: list[torch.Tensor] = []
 
@@ -251,8 +251,8 @@ class Trainer:
             critic=self.critic,
             replay=replay,
             epochs=cfg["epochs"],
-            ctx=cfg["ctx"],
-            imagination_horizon=cfg.get("imag_h", 15),
+            context_length=cfg["context_length"],
+            imagination_horizon=cfg.get("imagination_horizon", 15),
             gamma=cfg.get("gamma", 0.99),
             lam_return=cfg.get("lam_return", 0.95),
             lam=cfg.get("lam", 0.1),
@@ -300,7 +300,7 @@ class Trainer:
 
         # Training hyper-parameters ---------------------------------------
         epochs: int = kwargs.pop("epochs")
-        ctx: int = kwargs.pop("ctx")
+        context_length: int = kwargs.pop("context_length")
         imagination_horizon: int = kwargs.pop("imagination_horizon")
         gamma: float = kwargs.pop("gamma")
         lam_return: float = kwargs.pop("lam_return")
@@ -377,7 +377,7 @@ class Trainer:
                         wm,  # updated weights are visible across threads
                         actor,
                         steps=online_steps,
-                        ctx=ctx,
+                        context_length=context_length,
                         num_envs=num_envs,
                     )
                 except Exception as exc:
@@ -415,7 +415,7 @@ class Trainer:
                 wm,
                 actor,
                 steps=min_prefill,
-                ctx=ctx,
+                context_length=context_length,
                 num_envs=num_envs,
             )
 
@@ -505,7 +505,7 @@ class Trainer:
                 # --- push action token, predict next latent -----------------
                 roll = torch.cat(
                     [
-                        input_tokens[:, -ctx * (N_PATCH + 1) :],
+                        input_tokens[:, -context_length * (N_PATCH + 1) :],
                         (ACTION_ID_START + actions).unsqueeze(1),
                     ],
                     1,
@@ -532,7 +532,8 @@ class Trainer:
 
             for t in reversed(range(time_horizon)):
                 running_return = imagined_rewards[:, t] + gamma * (
-                    (1 - lam_return) * values[:, t] + lam_return * running_return
+                    (1 - lam_return) * values[:, t]
+                    + lam_return * running_return
                 )
                 returns[:, t] = running_return
 

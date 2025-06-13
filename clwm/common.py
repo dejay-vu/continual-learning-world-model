@@ -20,10 +20,10 @@ import torch
 
 from .models.vqvae import K  # pylint: disable=cyclic-import
 
-MAX_ACTIONS = 18                         # Max Atari action-space size
-ACTION_ID_START = K                      # First action id (128)
-PAD_TOKEN = K + MAX_ACTIONS              # Mask token (rarely used)
-VOCAB_SIZE = PAD_TOKEN + 1               # Embedding size 147
+MAX_ACTIONS = 18  # Max Atari action-space size
+ACTION_ID_START = K  # First action id (128)
+PAD_TOKEN = K + MAX_ACTIONS  # Mask token (rarely used)
+VOCAB_SIZE = PAD_TOKEN + 1  # Embedding size 147
 VQVAE_CHECKPOINT = "vqvae_atari.safetensors"
 TORCH_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -82,20 +82,54 @@ def unimix_generic(logits: torch.Tensor, p: float = 0.01):
     return probs * (1 - p) + p / logits.size(-1)
 
 
-def encode_two_hot(y: torch.Tensor, *, bins: torch.Tensor | None = None):
-    bins = _get_reward_bins(y.device) if bins is None else bins
+def encode_two_hot(
+    target_values: torch.Tensor, *, bins: torch.Tensor | None = None
+):
+    """Continuous-to-two-hot encoding.
 
-    y = torch.clamp(y, bins[0], bins[-1])
-    k = torch.searchsorted(bins, y)
-    k0 = torch.clamp(k - 1, 0, len(bins) - 2)
-    k1 = k0 + 1
-    w1 = (y - bins[k0]) / (bins[k1] - bins[k0])
-    w0 = 1.0 - w1
+    Each *target* scalar is projected onto the two *nearest* bin centers and
+    represented as a weighted mixture ("two-hot" vector).  The weights are
+    chosen such that linear expectation over the two-hot encoding recovers the
+    original scalar (up to clipping at the bin edges).
 
-    enc = torch.zeros((*y.shape, len(bins)), device=y.device)
-    enc.scatter_(-1, k0.unsqueeze(-1), w0.unsqueeze(-1))
-    enc.scatter_(-1, k1.unsqueeze(-1), w1.unsqueeze(-1))
-    return enc
+    Parameters
+    ----------
+    target_values : torch.Tensor
+        Tensor of real-valued numbers that will be encoded.
+    bins : torch.Tensor, optional
+        Centers of the discretisation bins.  When not provided the global
+        ``REWARD_BINS`` for the *current* device are used.
+    """
+
+    bins = _get_reward_bins(target_values.device) if bins is None else bins
+
+    # Clamp to the valid bin range to avoid index errors --------------------
+    clamped_values = torch.clamp(target_values, bins[0], bins[-1])
+
+    # Indices of the *right* bin such that bins[idx-1] ≤ value ≤ bins[idx]
+    upper_indices = torch.searchsorted(bins, clamped_values)
+
+    left_indices = torch.clamp(upper_indices - 1, 0, len(bins) - 2)
+    right_indices = left_indices + 1
+
+    # Linear interpolation weights between the two neighbouring bins --------
+    right_weight = (clamped_values - bins[left_indices]) / (
+        bins[right_indices] - bins[left_indices]
+    )
+    left_weight = 1.0 - right_weight
+
+    # Dense (…, |bins|) tensor with zeros everywhere except the two active
+    # neighbouring bins.
+    two_hot = torch.zeros(
+        (*clamped_values.shape, len(bins)), device=target_values.device
+    )
+
+    two_hot.scatter_(-1, left_indices.unsqueeze(-1), left_weight.unsqueeze(-1))
+    two_hot.scatter_(
+        -1, right_indices.unsqueeze(-1), right_weight.unsqueeze(-1)
+    )
+
+    return two_hot
 
 
 def expect_symlog(logits: torch.Tensor):
@@ -116,20 +150,24 @@ def expect_raw(logits: torch.Tensor):
 import torch.nn.functional as F  # placed after torch import
 
 
-def split_cross_entropy(logits: torch.Tensor, tgt: torch.Tensor):
+def split_cross_entropy(logits: torch.Tensor, target: torch.Tensor):
     flat_logits = logits.view(-1, VOCAB_SIZE)
-    flat_tgt = tgt.reshape(-1)
+    flat_target = target.reshape(-1)
 
-    m_img = flat_tgt < ACTION_ID_START
-    m_act = (flat_tgt >= ACTION_ID_START) & (flat_tgt != PAD_TOKEN)
+    m_img = flat_target < ACTION_ID_START
+    m_act = (flat_target >= ACTION_ID_START) & (flat_target != PAD_TOKEN)
 
     ce_img = (
-        F.cross_entropy(flat_logits[m_img], flat_tgt[m_img], reduction="mean")
+        F.cross_entropy(
+            flat_logits[m_img], flat_target[m_img], reduction="mean"
+        )
         if m_img.any()
         else torch.tensor(0.0, device=logits.device)
     )
     ce_act = (
-        F.cross_entropy(flat_logits[m_act], flat_tgt[m_act], reduction="mean")
+        F.cross_entropy(
+            flat_logits[m_act], flat_target[m_act], reduction="mean"
+        )
         if m_act.any()
         else torch.tensor(0.0, device=logits.device)
     )
@@ -143,28 +181,62 @@ def fisher_diagonal(
 
     device = next(model.parameters()).device
 
-    diag_gpu = [
+    fisher_diag_buffers = [
         torch.zeros_like(p, dtype=torch.float32, device=device)
         for p in model.parameters()
         if p.requires_grad
     ]
 
-    for i in range(0, batch.size(0), chunk):
-        sub = batch[i : i + chunk].to(device, non_blocking=True)
+    total_target_tokens = torch.tensor(0.0, device=device, dtype=torch.float32)
+
+    for start_idx in range(0, batch.size(0), chunk):
+        batch_chunk = batch[start_idx : start_idx + chunk].to(
+            device, non_blocking=True
+        )
+        # ------------------------------------------------------------------
+        # The stored replay sequences have shape (B, C, T) where C is the
+        # context window and T the number of tokens *per* time-step (N_PATCH
+        # image tokens plus the action token).  During regular training the
+        # two right-most dimensions are **flattened** before being fed into
+        # the Transformer (see *Trainer._train_single_task_loop*).  We mirror
+        # the same pre-processing here to keep the input format consistent
+        # with what the world model expects.
+        # ------------------------------------------------------------------
+
+        input_tokens = batch_chunk[:, :-1]
+        target_tokens = batch_chunk[:, 1:]
+
+        # Collapse (context, tokens_per_step) → (sequence_length)
+        if input_tokens.ndim == 3:
+            batch_size_current = input_tokens.size(0)
+            input_tokens = input_tokens.reshape(batch_size_current, -1)
+            target_tokens = target_tokens.reshape(batch_size_current, -1)
+
         loss = F.cross_entropy(
-            model(sub[:, :-1]).view(-1, VOCAB_SIZE),
-            sub[:, 1:].reshape(-1),
+            model(input_tokens).view(-1, VOCAB_SIZE),
+            target_tokens.reshape(-1),
             ignore_index=PAD_TOKEN,
             reduction="sum",
         )
 
-        params = [p for p in model.parameters() if p.requires_grad]
-        grads = torch.autograd.grad(loss, params, allow_unused=True)
+        # Keep track of how many target tokens contributed to the summed CE so
+        # that we can later *average* the Fisher estimate per token.
+        total_target_tokens += (target_tokens != PAD_TOKEN).sum()
 
-        for d_gpu, g in zip(diag_gpu, grads):
-            if g is not None:
-                d_gpu.add_(g.detach().pow(2))
+        trainable_parameters = [
+            p for p in model.parameters() if p.requires_grad
+        ]
+        grads = torch.autograd.grad(
+            loss, trainable_parameters, allow_unused=True
+        )
 
-    N = (batch[:, 1:] != PAD_TOKEN).sum().to(device=device, dtype=torch.float32)
-    diag = [d / N for d in diag_gpu]
-    return diag
+        for fisher_buf, grad in zip(fisher_diag_buffers, grads):
+            if grad is not None:
+                fisher_buf.add_(grad.detach().pow(2))
+
+    # Average over the *total* number of target tokens that contributed to the
+    # Fisher estimate across **all** processed chunks.
+    fisher_diagonal_estimate = [
+        buf / total_target_tokens for buf in fisher_diag_buffers
+    ]
+    return fisher_diagonal_estimate
