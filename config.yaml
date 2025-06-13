@@ -10,4 +10,4 @@ training:
   gamma: 0.99
   lam_return: 0.95
   lam: 0.1
-  online_steps: 1024
+  online_steps: 4096

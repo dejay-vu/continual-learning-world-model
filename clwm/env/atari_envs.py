@@ -50,7 +50,6 @@ def make_atari_vectorized_envs(
         base,
         num_envs=num_envs,
         vectorization_mode="async",
-        vector_kwargs={"shared_memory": False},  # /dev/shm free
         wrappers=[wrap_reward_symlog],
         max_episode_steps=max_episode_steps,
         frameskip=frameskip,
