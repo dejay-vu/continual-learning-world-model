@@ -33,12 +33,12 @@ class FlashAttentionBlock(nn.Module):
     """
 
     def __init__(
-        self, d_model: int, n_head: int, routers: int = 1, drop: float = 0.1
+        self, dim: int, heads: int, routers: int = 1, drop: float = 0.1
     ):
         super().__init__()
-        assert d_model % n_head == 0, "d_model must be divisible by n_head"
-        self.heads = n_head
-        self.head_dim = d_model // n_head
+        assert dim % heads == 0, "dim must be divisible by heads"
+        self.heads = heads
+        self.head_dim = dim // heads
 
         # QKV are packed together for flash-attn: (B, L, 3, H, D)
         # When the surrounding code runs under mixed precision (torch.cuda.amp
@@ -58,30 +58,30 @@ class FlashAttentionBlock(nn.Module):
         proj_dtype = torch.float32
 
         self.qkv = nn.Linear(
-            d_model, 3 * d_model, bias=False, dtype=proj_dtype
+            dim, 3 * dim, bias=False, dtype=proj_dtype
         )
-        self.o_proj = nn.Linear(d_model, d_model, bias=False, dtype=proj_dtype)
+        self.o_proj = nn.Linear(dim, dim, bias=False, dtype=proj_dtype)
 
         # Feed‑forward network
         self.ffn = nn.Sequential(
-            nn.Linear(d_model, 4 * d_model),
+            nn.Linear(dim, 4 * dim),
             nn.GELU(),
             nn.Dropout(drop),
-            nn.Linear(4 * d_model, d_model),
+            nn.Linear(4 * dim, dim),
             nn.Dropout(drop),
         )
 
         # Layer norms
-        self.ln1 = nn.LayerNorm(d_model)  # post-attn LN
-        self.ln2 = nn.LayerNorm(d_model)  # between adapter+ffn and residual
+        self.ln1 = nn.LayerNorm(dim)  # post-attn LN
+        self.ln2 = nn.LayerNorm(dim)  # between adapter+ffn and residual
 
         # Rotary positional embedding (applied inside forward)
         self.rope = RotaryEmbedding(dim=self.head_dim)
         self.attn_dropout = nn.Dropout(drop)
 
         # LoRA adapters and router
-        self.adapters = nn.ModuleList([LoRA(d_model) for _ in range(routers)])
-        self.router = nn.Linear(d_model, routers)
+        self.adapters = nn.ModuleList([LoRA(dim) for _ in range(routers)])
+        self.router = nn.Linear(dim, routers)
 
         # Temperature for routing softmax
         self.register_buffer("tau", torch.tensor(1.0))

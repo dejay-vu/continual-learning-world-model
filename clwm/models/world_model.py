@@ -313,7 +313,7 @@ class Replay:
     ) -> np.ndarray:
         """Epsilon-greedy action selection using the current *actor* net."""
 
-        z = wm.tok(frame_ids.to(TORCH_DEVICE)).mean(1)  # (N, d_lat)
+        z = wm.tok(frame_ids.to(TORCH_DEVICE)).mean(1)  # (N, embed_dim)
         probs = actor(z)  # (N, A)
         dist = torch.distributions.Categorical(probs)
         greedy_actions = dist.sample().cpu().numpy()
@@ -402,18 +402,18 @@ class Replay:
 class WorldModel(nn.Module):
     """Transformer world model predicting tokens and rewards."""
 
-    def __init__(self, d: int = 256, layers: int = 6, heads: int = 8) -> None:
+    def __init__(self, dim: int = 256, layers: int = 6, heads: int = 8) -> None:
         super().__init__()
-        self.tok = nn.Embedding(VOCAB_SIZE, d)
+        self.tok = nn.Embedding(VOCAB_SIZE, dim)
         self.blocks = nn.ModuleList(
             [
-                FlashAttentionBlock(d_model=d, n_head=heads)
+                FlashAttentionBlock(dim=dim, heads=heads)
                 for _ in range(layers)
             ]
         )
-        self.ln = nn.LayerNorm(d)
-        self.head = nn.Linear(d, VOCAB_SIZE, bias=False)
-        self.reward_head = nn.Linear(d, len(REWARD_BINS), bias=False)
+        self.ln = nn.LayerNorm(dim)
+        self.head = nn.Linear(dim, VOCAB_SIZE, bias=False)
+        self.reward_head = nn.Linear(dim, len(REWARD_BINS), bias=False)
         nn.init.zeros_(self.reward_head.weight)
 
     def add_task(self) -> None:
@@ -455,10 +455,10 @@ class WorldModel(nn.Module):
 class ActorNetwork(nn.Module):
     """Policy network mapping latent state to action distribution."""
 
-    def __init__(self, d_lat: int) -> None:
+    def __init__(self, dim: int) -> None:
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(d_lat, 512), nn.ReLU(), nn.Linear(512, MAX_ACTIONS)
+            nn.Linear(dim, 512), nn.ReLU(), nn.Linear(512, MAX_ACTIONS)
         )
 
     def forward(self, z: torch.Tensor, p_unimix: float = 0.01) -> torch.Tensor:
@@ -466,7 +466,7 @@ class ActorNetwork(nn.Module):
         Args
         ----
         z : torch.Tensor
-            Latent state from the world model, shape (B, d_lat).
+            Latent state from the world model, shape (B, dim).
         p_unimix : float
             Fraction of probability mass to spread uniformly (default 1 %).
 
@@ -483,10 +483,10 @@ class ActorNetwork(nn.Module):
 class CriticNetwork(nn.Module):
     """Value network estimating future rewards."""
 
-    def __init__(self, d: int) -> None:
+    def __init__(self, dim: int) -> None:
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(d, 512),
+            nn.Linear(dim, 512),
             nn.SiLU(),
             nn.Linear(512, len(REWARD_BINS), bias=False),
         )

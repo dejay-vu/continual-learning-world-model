@@ -671,22 +671,15 @@ class Trainer:
 
         # Fallback to the default value used by :class:`WorldModel` when the
         # user does not override the model size via the CLI.
-        dim = self.model_cfg.get("dim") or self.model_cfg.get("d") or 256
+        dim = self.model_cfg.get("dim", 256)
 
-        # Translate YAML naming scheme -> constructor arguments
-        # Extract the subset of recognised keyword arguments for each model
-        wm_kwargs = dict(self.model_cfg)
-
-        # Backwards-compatibility: *dim* (YAML) → *d* (code)
-        if "dim" in wm_kwargs and "d" not in wm_kwargs:
-            wm_kwargs["d"] = wm_kwargs.pop("dim")
-
-        allowed_wm_keys = {"d", "layers", "heads"}
+        # Extract recognised kwargs for the world model
+        allowed_wm_keys = {"dim", "layers", "heads"}
         wm_kwargs = {
-            k: v for k, v in wm_kwargs.items() if k in allowed_wm_keys
+            k: v for k, v in self.model_cfg.items() if k in allowed_wm_keys
         }
 
         wm = WorldModel(**wm_kwargs).to(TORCH_DEVICE)
-        actor = ActorNetwork(d_lat=dim).to(TORCH_DEVICE)
-        critic = CriticNetwork(d=dim).to(TORCH_DEVICE)
+        actor = ActorNetwork(dim=dim).to(TORCH_DEVICE)
+        critic = CriticNetwork(dim=dim).to(TORCH_DEVICE)
         return wm, actor, critic
