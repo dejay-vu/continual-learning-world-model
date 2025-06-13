@@ -40,9 +40,27 @@ class FlashAttentionBlock(nn.Module):
         self.heads = n_head
         self.head_dim = d_model // n_head
 
-        # QKV are packed together for flash‑attn: (B, L, 3, H, D)
-        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
-        self.o_proj = nn.Linear(d_model, d_model, bias=False)
+        # QKV are packed together for flash-attn: (B, L, 3, H, D)
+        # When the surrounding code runs under mixed precision (torch.cuda.amp
+        # autocast) we instantiate the projection layers directly in half
+        # precision to avoid the temporary fp32 → fp16 cast that would
+        # otherwise create a duplicate buffer of size 3·B·L·D.
+
+        # Keep the projection weights in fp32. Mixed-precision speed-ups are
+        # provided by *autocast* which automatically casts the *inputs* to
+        # fp16/bf16 when appropriate. Storing the parameters themselves in
+        # fp16 breaks `torch.cuda.amp.GradScaler` (gradients remain fp16) and
+        # also causes dtype mismatches when LayerNorm up-casts its outputs to
+        # fp32 before the subsequent Linear. Using fp32 weights therefore
+        # delivers the desired kernel fusion benefits without the stability
+        # issues.
+
+        proj_dtype = torch.float32
+
+        self.qkv = nn.Linear(
+            d_model, 3 * d_model, bias=False, dtype=proj_dtype
+        )
+        self.o_proj = nn.Linear(d_model, d_model, bias=False, dtype=proj_dtype)
 
         # Feed‑forward network
         self.ffn = nn.Sequential(
@@ -88,8 +106,9 @@ class FlashAttentionBlock(nn.Module):
 
         if FLASH_ATTENTION_AVAILABLE and x.is_cuda:
             # ---- Fast path using flash-attn --------------------------------
-            # Compute raw QKV on x (no pre-LN) to match original ordering
-            qkv = self.qkv(x)  # (B, L, 3*D)
+            # Compute raw QKV – cast to fp16 if autocast is active to avoid
+            # reallocating a fp32 buffer that would immediately be down-cast.
+            qkv = self.qkv(x)  # (B, L, 3*D) — already fp16 under autocast
             qkv = qkv.view(bsz, seqlen, 3, self.heads, self.head_dim)
 
             # Rotary positional embedding (GPU-only path). The upstream

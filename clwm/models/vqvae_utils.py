@@ -40,29 +40,61 @@ def frame_to_indices(frame_u8: np.ndarray, vqvae: VQVAE) -> np.ndarray:
 
 @torch.no_grad()
 def frames_to_indices(
-    frames_u8: np.ndarray, vqvae: VQVAE, *, batch_size: int = 2048
-) -> np.ndarray:
-    """Convert an array of uint8 frames to discrete VQ-VAE indices.
+    frames_u8: np.ndarray,
+    vqvae: VQVAE,
+    *,
+    batch_size: int = 2048,
+    device: torch.device | str | None = None,
+) -> torch.Tensor | np.ndarray:
+    """Convert a batch of RGB frames to discrete VQ-VAE codebook indices.
 
-    The previous implementation loaded the entire dataset onto the GPU at once,
-    which could easily exceed available memory for large datasets. The function
-    now processes the frames in smaller batches, drastically reducing the peak
-    memory usage during the conversion step.
+    Parameters
+    ----------
+    frames_u8 : np.ndarray
+        Array of shape (T, H, W, 3) and dtype uint8.
+    vqvae : VQVAE
+        Pre-loaded VQ-VAE model.
+    batch_size : int, default 2048
+        Mini-batch size processed by the encoder (trades memory for speed).
+    device : torch.device | str | None, default *None*
+        • ``None``  – behave exactly like the previous implementation and
+          return a *numpy* array on the CPU (backwards-compatible).
+        • else      – return a *torch.Tensor* residing on the given device.
+
+    Returns
+    -------
+    torch.Tensor | np.ndarray
+        Tensor/array of shape (T, N_PATCH) with dtype long / int64.
     """
 
-    ids_list = []
+    want_torch = device is not None
+    if device is None:
+        device = TORCH_DEVICE  # internal workspace for encoder
+
+    ids_list: list[torch.Tensor] = []
+    use_fp16 = torch.cuda.is_available() and (device == "cuda" or str(device).startswith("cuda"))
+
     for i in range(0, len(frames_u8), batch_size):
         batch = frames_u8[i : i + batch_size]
-        x = (
-            torch.from_numpy(batch)
-            .to(TORCH_DEVICE, dtype=torch.float32, non_blocking=True)
-            .permute(0, 3, 1, 2)
-            / 255.0
-        )
+
+        # Move the *pixel* data to the *working* device (might differ from
+        # final requested output device).
+        x = torch.from_numpy(batch).to(device, non_blocking=True)
+        x = x.to(dtype=torch.float16 if use_fp16 else torch.float32)
+        x = x.permute(0, 3, 1, 2) / 255.0
         x = F.interpolate(x, (RES, RES), mode="bilinear", align_corners=False)
-        with torch.amp.autocast("cuda"):
+
+        with torch.autocast("cuda" if device == "cuda" else "cpu", dtype=x.dtype):
             lat = vqvae.enc(x)
             _, ids, _ = vqvae.vq(lat.flatten(0, 1))
-        ids_list.append(ids.view(x.size(0), -1).cpu())
 
-    return torch.cat(ids_list, 0).numpy()
+        ids = ids.view(x.size(0), -1)  # (B, N_PATCH)
+        ids_list.append(ids)
+
+    ids_cat = torch.cat(ids_list, 0)
+
+    if want_torch:
+        # Move to the *requested* target device (may be CPU / CUDA)
+        return ids_cat.to(device, non_blocking=True)
+    else:
+        return ids_cat.cpu().numpy()

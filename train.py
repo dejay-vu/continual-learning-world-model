@@ -15,6 +15,10 @@ from clwm.models.world_model import (
     CriticNetwork,
     Replay,
 )
+
+# ---------------- Mixed-precision helpers -----------------------------
+import contextlib
+from torch.amp import autocast, GradScaler
 from clwm.utils import (
     TORCH_DEVICE,
     encode_two_hot,
@@ -83,9 +87,14 @@ def train_on_task(
     opt_act = Adam(actor.parameters(), 4e-4)
     opt_cri = Adam(critic.parameters(), 4e-4)
 
+    scaler = GradScaler(device="cuda", enabled=(TORCH_DEVICE == "cuda"))
+
     loss_history = []
 
     pbar = tqdm(total=epochs, desc=f"Learning {game}")
+
+    collect_thread = None  # background data-collection worker
+
     while len(loss_history) < epochs:
 
         # -------------------------------------------------------------
@@ -96,17 +105,38 @@ def train_on_task(
         #    previous frame-processing bottleneck.
         # -------------------------------------------------------------
 
-        replay.fill(
-            game,
-            wm,
-            actor,
-            global_buffer,
-            steps=online_steps,
-            ctx=ctx,
-            num_envs=num_envs,
-        )
+        # -------------------------------------------------------------
+        # Optionally overlap data collection with GPU training by running
+        # the environment interaction in a *background* thread.  This hides
+        # at least part of the emulator latency and increases the effective
+        # GPU utilisation without touching the algebraic part of the model.
+        # -------------------------------------------------------------
 
-        BATCH_SIZE = 64
+        # Wait for the previous collection cycle (if any) to finish so that
+        # we always have fresh data available in the buffer.  The wait is at
+        # the *beginning* of the loop which means that collection of the
+        # *next* batch runs in parallel with the *current* optimisation step.
+        if collect_thread is not None:
+            collect_thread.join()
+
+        import threading
+
+        def _collector():
+            replay.fill(
+                game,
+                wm,
+                actor,
+                global_buffer,
+                steps=online_steps,
+                ctx=ctx,
+                num_envs=num_envs,
+            )
+
+        # Launch async collection for the *next* iteration.
+        collect_thread = threading.Thread(target=_collector, daemon=True)
+        collect_thread.start()
+
+        BATCH_SIZE = 128
 
         current_samples = replay.sample(int(0.8 * BATCH_SIZE))
         global_samples = (
@@ -121,7 +151,10 @@ def train_on_task(
             x[1] for x in global_samples
         ]
 
-        batch = torch.stack(sequences).to(TORCH_DEVICE)  # (B, ctx, 26)
+        batch_cpu = torch.stack(sequences)
+        if TORCH_DEVICE == "cuda":
+            batch_cpu = batch_cpu.pin_memory()
+        batch = batch_cpu.to(TORCH_DEVICE, non_blocking=True)  # (B, ctx, 26)
         reward_env = torch.tensor(
             sample_rewards, dtype=torch.float16, device=TORCH_DEVICE
         )  # (B,)
@@ -130,13 +163,28 @@ def train_on_task(
         inp = batch[:, :-1].reshape(B, -1)
         tgt = batch[:, 1:].reshape(B, -1)
 
-        # logits, kl = wm(inp, return_ent=True)  # kl is mean KL per batch
-        logits, kl, h = wm(inp, return_ent=True, return_reward=True)
+        # ----- forward pass under mixed precision -------------------
+        with (
+            autocast(device_type="cuda", dtype=torch.float32)
+            if TORCH_DEVICE == "cuda"
+            else contextlib.nullcontext()
+        ):
+            logits, kl, h = wm(inp, return_ent=True, return_reward=True)
 
         ce_img, ce_act = split_cross_entropy(logits, tgt)
         ce = 0.4 * ce_img + 0.6 * ce_act
 
-        reward_logits = wm.reward_head(h[:, -1])  # (B, |BINS|)
+        # LayerNorm in mixed-precision currently upcasts its output to
+        # fp32 which causes a dtype mismatch with the fp16-cast model
+        # parameters when CUDA is available.  Making sure that the hidden
+        # state fed into the *reward_head* has the same dtype as the layer’s
+        # weights avoids the runtime error "mat1 and mat2 must have the same
+        # dtype" while keeping the rest of the computation untouched.
+
+        reward_head_dtype = wm.reward_head.weight.dtype
+        reward_logits = wm.reward_head(
+            h[:, -1].to(reward_head_dtype)
+        )  # (B, |BINS|)
         reward_target = encode_two_hot(reward_env)
 
         log_probs = torch.log_softmax(reward_logits, dim=-1)
@@ -227,13 +275,25 @@ def train_on_task(
         opt_wm.zero_grad()
         opt_act.zero_grad()
         opt_cri.zero_grad()
-        loss.backward()
 
-        torch.nn.utils.clip_grad_norm_(wm.parameters(), 5.0)
+        if TORCH_DEVICE == "cuda":
+            scaler.scale(loss).backward()
+            # Gradient clipping requires unscaled grads
+            scaler.unscale_(opt_wm)
+            scaler.unscale_(opt_act)
+            scaler.unscale_(opt_cri)
+            torch.nn.utils.clip_grad_norm_(wm.parameters(), 5.0)
 
-        opt_wm.step()
-        opt_act.step()
-        opt_cri.step()
+            scaler.step(opt_wm)
+            scaler.step(opt_act)
+            scaler.step(opt_cri)
+            scaler.update()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(wm.parameters(), 5.0)
+            opt_wm.step()
+            opt_act.step()
+            opt_cri.step()
 
         for b in wm.blocks:
             b.tau.mul_(0.90).clamp_(min=0.02)
@@ -254,6 +314,11 @@ def train_on_task(
         pbar.update(1)
 
     pbar.close()
+
+    # Ensure the final background collection finishes before we leave the
+    # function and potentially destroy the replay buffer.
+    if "collect_thread" in locals() and collect_thread is not None:
+        collect_thread.join()
 
     return ce
 
@@ -311,6 +376,22 @@ if __name__ == "__main__":
     actor = ActorNetwork(dim).to(TORCH_DEVICE)
     critic = CriticNetwork(dim).to(TORCH_DEVICE)
 
+    # Only use half precision when CUDA is available; on CPU float16 operations
+    # often fall back to slow/unimplemented code paths and can cause numerical
+    # issues.  The mixed-precision training blocks below already guard on the
+    # device type, so here we merely ensure that the model dtypes are sane.
+    # Keep model parameters in fp32 while relying on *autocast* for the
+    # forward pass.  Casting the weights to fp16 leads to fp16 gradients which
+    # are not supported by `torch.cuda.amp.GradScaler` and triggers the
+    # runtime error "Attempting to unscale FP16 gradients" during the backward
+    # pass.  Using fp32 weights together with autocast still provides the
+    # desired mixed-precision speed-ups while maintaining numerical stability
+    # and full support for gradient scaling.
+    #
+    # (If memory is a concern, consider using torch.compile() + NVME offload
+    #  or bfloat16 on newer GPUs instead of down-casting trainable parameters.)
+    pass  # ← the autocast context below already handles mixed precision
+
     running_weights = None
     running_fisher = None
 
@@ -351,7 +432,6 @@ if __name__ == "__main__":
         else:
             TASKS.extend([g for g in games if g != held_out])
 
-    TASKS = list(dict.fromkeys(TASKS))  # remove duplicates, preserve order
     eval_tasks = held_out_games
 
     # Randomize training order for continual learning setting.

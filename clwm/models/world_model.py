@@ -91,7 +91,7 @@ class Replay:
             *add* (tuples of (sequence, reward)).
         steps : int, default 512
             Number of *vectorised* environment steps.  The actual amount of
-            data pushed to the buffer equals ``steps × num_envs``.
+            data pushed to the buffer equals ``steps * num_envs``.
         ctx : int, default 64
             Context length used when constructing token sequences.
         num_envs : int, default 16
@@ -110,71 +110,61 @@ class Replay:
 
         obs, _ = envs.reset()
 
-        # Accumulators for later batch processing
-        frames_all, actions_all, rewards_all, dones_all = [], [], [], []
+        # ------------------------------------------------------------------
+        #  The previous implementation accumulated *all* frames, actions …
+        #  in Python lists and then encoded the entire 4096-frame tensor at
+        #  once, creating large temporary GPU allocations.  We now encode
+        #  each mini-batch of observations on-the-fly and keep all
+        #  non-image data on the CPU until the final push into the replay
+        #  buffer.  This reduces peak GPU memory by several gigabytes and
+        #  unblocks the training thread earlier.
+        # ------------------------------------------------------------------
+
+        token_list: list[torch.Tensor] = []
+        actions_all, rewards_all, dones_all = [], [], []
 
         for _ in range(steps):
-            # ---------------------------------------------------------
-            # 1) Encode current observations via VQ-VAE → discrete ids
-            # ---------------------------------------------------------
-            ids_np = frames_to_indices(obs, vqvae, batch_size=obs.shape[0])
-            ids = torch.tensor(ids_np, device=TORCH_DEVICE)
-
-            # ---------------------------------------------------------
-            # 2) Policy inference & ε-greedy exploration
-            # ---------------------------------------------------------
-            actions = self._select_actions(
-                actor, wm, ids, envs.single_action_space, eps=eps
+            # 1) VQ-VAE encoding of *current* observations only (≤ batch_size)
+            #    The indices remain on the GPU so we can feed them directly to
+            #    the policy network without an additional host→device copy.
+            ids_gpu = frames_to_indices(
+                obs, vqvae, batch_size=256, device=TORCH_DEVICE
             )
 
-            # ---------------------------------------------------------
-            # 3) Environment step
-            # ---------------------------------------------------------
-            next_obs, reward, term, trunc, _ = envs.step(actions.tolist())
+            # 2) Action selection (uses the on-device tokens)
+            actions = self._select_actions(
+                actor, wm, ids_gpu, envs.single_action_space, eps=eps
+            )
 
+            # 3) Environment step (actions need to be Python ints)
+            next_obs, reward, term, trunc, _ = envs.step(actions.tolist())
             done = np.logical_or(term, trunc)
 
-            # ---------------------------------------------------------
-            # 4) Store results for batched post-processing
-            # ---------------------------------------------------------
-            frames_all.append(obs)
-            actions_all.append(actions)
+            # 4) Append to host-side buffers (store **CPU** copy only once)
+            token_list.append(ids_gpu.cpu())
+            actions_all.append(actions.astype(np.int16))
             rewards_all.append(reward.astype(np.float32))
-            dones_all.append(done)
+            dones_all.append(done.astype(np.bool_))
 
             obs = next_obs
 
-            # Auto-reset (Gymnasium handles this in NEXT_STEP mode – fallback
-            # kept for older versions).
+            # Auto-reset for older Gymnasium versions
             if hasattr(envs, "reset_done"):
                 envs.reset_done()
 
-        # -------------------------------------------------------------
-        # Batched post-processing (mimics the offline dataset layout)
-        # -------------------------------------------------------------
+        # ------------------- post-processing -----------------------------
+        ids_cpu = torch.cat(token_list, 0)  # (T, N_PATCH)  on CPU
 
-        frames_np = np.concatenate(frames_all, axis=0)
-        actions_np = np.concatenate(actions_all, axis=0).astype(np.int16)
-        rewards_np = np.concatenate(rewards_all, axis=0).astype(np.float32)
-        dones_np = np.concatenate(dones_all, axis=0).astype(np.bool_)
+        actions_np = np.concatenate(actions_all, 0)
+        rewards_np = np.concatenate(rewards_all, 0)
+        dones_np = np.concatenate(dones_all, 0)
 
-        # Convert frames to discrete VQ tokens on GPU
-        ids = frames_to_indices(frames_np, vqvae, batch_size=4096)
-        ids_t = torch.tensor(ids, device=TORCH_DEVICE)
-
-        # Remaining arrays → GPU for further processing
-        actions_t = torch.tensor(actions_np, device=TORCH_DEVICE)
-        rewards_t = torch.tensor(
-            rewards_np, device=TORCH_DEVICE, dtype=torch.float16
-        )
-        dones_t = torch.tensor(dones_np, device=TORCH_DEVICE)
-
-        # In-place population of the replay buffer
+        # In-place population of the replay buffer (frames remain on CPU)
         self._fill(
-            ids_t,
-            actions_t,
-            rewards_t,
-            dones_t,
+            ids_cpu,
+            actions_np,
+            rewards_np,
+            dones_np,
             ctx=ctx,
             global_buffer=global_buffer,
         )
@@ -215,51 +205,75 @@ class Replay:
     def _fill(
         self,
         frames: torch.Tensor,
-        actions: torch.Tensor,
-        rewards: torch.Tensor,
-        dones: torch.Tensor,
+        actions: np.ndarray | torch.Tensor,
+        rewards: np.ndarray | torch.Tensor,
+        dones: np.ndarray | torch.Tensor,
         *,
         ctx: int = 64,
         global_buffer: List | None = None,
     ) -> None:
-        """Convert raw arrays into token sequences and store them."""
+        """Vectorised construction of ctx-length sequences and storage.
 
-        current_episode = []
-        for frame_ids, action, reward, done in zip(
-            frames, actions, rewards, dones
-        ):
-            current_episode.append((frame_ids, int(action)))
+        Parameters are expected on the *CPU*.  Only the final concatenated
+        sequence is moved to ``TORCH_DEVICE`` right before being stored so
+        that we do not keep unnecessary tensors resident on the GPU.
+        """
 
-            sequence = torch.stack(
-                [
-                    torch.cat(
-                        (
-                            t,
-                            torch.tensor(
-                                [ACTION_ID_START + act_], device=TORCH_DEVICE
-                            ),
-                        )
-                    )
-                    for t, act_ in current_episode[-ctx:]
-                ]
-            )
+        if isinstance(actions, torch.Tensor):
+            actions_np = actions.cpu().numpy()
+        else:
+            actions_np = actions
 
-            # Left-pad so that all sequences are exactly *ctx* tokens long
-            if sequence.size(0) < ctx:
-                pad = torch.full(
-                    (ctx - sequence.size(0), sequence.size(1)),
-                    PAD_TOKEN,
-                    device=TORCH_DEVICE,
-                )
-                sequence = torch.cat((pad, sequence), 0)
+        if isinstance(rewards, torch.Tensor):
+            rewards_np = rewards.cpu().numpy()
+        else:
+            rewards_np = rewards
 
-            self.add(sequence, float(reward))
+        if isinstance(dones, torch.Tensor):
+            dones_np = dones.cpu().numpy()
+        else:
+            dones_np = dones
 
+        # Pre-allocate a pad row for efficiency (CPU tensor)
+        pad_row = torch.full(
+            (frames.shape[1] + 1,), PAD_TOKEN, dtype=torch.long
+        )
+
+        episode_start = 0  # index of first step in current episode
+
+        for t in range(len(frames)):
+            # Determine slice for the last ≤ctx steps within current episode
+            # (episode boundary handled after storing the transition)
+
+            s = max(episode_start, t - ctx + 1)
+            idx = slice(s, t + 1)
+
+            # Build (len, N_PATCH+1) tensor : [frame_tokens ‖ action_token]
+            seq_frames = frames[idx]  # (L, N_PATCH)
+            seq_actions = torch.as_tensor(
+                ACTION_ID_START + actions_np[idx], dtype=torch.long
+            ).unsqueeze(1)
+            seq = torch.cat((seq_frames, seq_actions), 1)
+
+            # Left-pad if episode length < ctx
+            if seq.size(0) < ctx:
+                pad_needed = ctx - seq.size(0)
+                pad = pad_row.unsqueeze(0).expand(pad_needed, -1)
+                seq = torch.cat((pad, seq), 0)
+
+            # Keep sequences on the *CPU* to avoid occupying precious GPU
+            # memory.  Downstream training code will transfer only the sampled
+            # mini-batches to the device.
+            rew = float(rewards_np[t])
+
+            self.add(seq, rew)
             if global_buffer is not None:
-                global_buffer.append((sequence, float(reward)))
+                global_buffer.append((seq, rew))
 
-            if done:
-                current_episode.clear()
+            # Mark start of new episode *after* storing transition t so that
+            # the final frame of the episode is still included in ctx-windows.
+            if dones_np[t]:
+                episode_start = t + 1
 
 
 class WorldModel(nn.Module):
@@ -291,8 +305,16 @@ class WorldModel(nn.Module):
     ):
         x = self.tok(seq)
         ent_sum = 0.0
-        for b in self.blocks:
-            x, g = b(x)  # g is [batch, n_adapter]
+        import torch.utils.checkpoint as ckpt
+
+        for i, b in enumerate(self.blocks):
+            # Gradient-checkpoint every second block during training to lower
+            # activation memory.  We keep evaluation untouched to avoid the
+            # runtime overhead when gradients are not required.
+            if self.training and (i % 2 == 0):
+                x, g = ckpt.checkpoint(b, x, use_reentrant=True)
+            else:
+                x, g = b(x)
             if return_ent:
                 kl = (g * (g + 1e-8).log()).sum(-1) + math.log(g.size(-1))
                 ent_sum += kl
