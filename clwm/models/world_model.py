@@ -313,10 +313,12 @@ class Replay:
     ) -> np.ndarray:
         """Epsilon-greedy action selection using the current *actor* net."""
 
-        z = wm.tok(frame_ids.to(TORCH_DEVICE)).mean(1)  # (N, embed_dim)
-        probs = actor(z)  # (N, A)
-        dist = torch.distributions.Categorical(probs)
-        greedy_actions = dist.sample().cpu().numpy()
+        latent_state = wm.tok(frame_ids.to(TORCH_DEVICE)).mean(1)
+        action_probabilities = actor(latent_state)
+        action_distribution = torch.distributions.Categorical(
+            action_probabilities
+        )
+        greedy_actions = action_distribution.sample().cpu().numpy()
 
         # Epsilon-greedy mix with random actions from the env's native space
         random_actions = np.array(

@@ -177,7 +177,7 @@ class Trainer:
         """Generate rollouts using the *current* policy network."""
 
         cfg = self.training_cfg
-        ctx = cfg["ctx"]
+        context_length = cfg["ctx"]
 
         seqs: list[torch.Tensor] = []
 
@@ -198,7 +198,7 @@ class Trainer:
 
                 # Build (T, L) token sequence: image + padding (actions)
                 seq = torch.full(
-                    (len(envs), ctx),
+                    (len(envs), context_length),
                     ACTION_ID_START,  # dummy action tokens
                     dtype=torch.long,
                     device=TORCH_DEVICE,
@@ -214,7 +214,7 @@ class Trainer:
                 seqs.append(seq.cpu())
 
         if len(seqs) == 0:
-            return torch.empty(0, ctx, dtype=torch.long)
+            return torch.empty(0, context_length, dtype=torch.long)
         return torch.cat(seqs)
 
     def evaluate_on_sequences(self, seqs: torch.Tensor):
@@ -252,7 +252,7 @@ class Trainer:
             replay=replay,
             epochs=cfg["epochs"],
             ctx=cfg["ctx"],
-            imag_h=cfg.get("imag_h", 15),
+            imagination_horizon=cfg.get("imag_h", 15),
             gamma=cfg.get("gamma", 0.99),
             lam_return=cfg.get("lam_return", 0.95),
             lam=cfg.get("lam", 0.1),
@@ -301,7 +301,7 @@ class Trainer:
         # Training hyper-parameters ---------------------------------------
         epochs: int = kwargs.pop("epochs")
         ctx: int = kwargs.pop("ctx")
-        imag_h: int = kwargs.pop("imag_h")
+        imagination_horizon: int = kwargs.pop("imagination_horizon")
         gamma: float = kwargs.pop("gamma")
         lam_return: float = kwargs.pop("lam_return")
         lam: float = kwargs.pop("lam")
@@ -453,15 +453,17 @@ class Trainer:
             batch = batch_gpu  # already on device
             reward_env = reward_env_tensor  # on device
 
-            B, _, _ = batch.shape
-            inp = batch[:, :-1].reshape(B, -1)
-            tgt = batch[:, 1:].reshape(B, -1)
+            batch_size_now, _, _ = batch.shape
+            input_tokens = batch[:, :-1].reshape(batch_size_now, -1)
+            target_tokens = batch[:, 1:].reshape(batch_size_now, -1)
 
             # ----- forward pass under mixed precision -------------------
             with autocast(device_type="cuda", dtype=torch.float16):
-                logits, kl, h = wm(inp, return_ent=True, return_reward=True)
+                logits, kl, hidden_states = wm(
+                    input_tokens, return_ent=True, return_reward=True
+                )
 
-            ce_img, ce_act = split_cross_entropy(logits, tgt)
+            ce_img, ce_act = split_cross_entropy(logits, target_tokens)
             ce = 0.4 * ce_img + 0.6 * ce_act
 
             # LayerNorm in mixed-precision currently upcasts its output to
@@ -473,7 +475,7 @@ class Trainer:
 
             reward_head_dtype = wm.reward_head.weight.dtype
             reward_logits = wm.reward_head(
-                h[:, -1].to(reward_head_dtype)
+                hidden_states[:, -1].to(reward_head_dtype)
             )  # (B, |BINS|)
             reward_target = encode_two_hot(reward_env)
 
@@ -481,56 +483,58 @@ class Trainer:
             loss_reward = -(reward_target * log_probs).sum(-1).mean()
 
             # imagination rollout
-            last = inp[:, -N_PATCH:]
-            z0 = wm.tok(last).mean(1)
-            zs, logps, entropies, imagined_rewards, values = (
-                [z0],
+            last_tokens = input_tokens[:, -N_PATCH:]
+            initial_latent = wm.tok(last_tokens).mean(1)
+            latents, log_probabilities, entropies, imagined_rewards, values = (
+                [initial_latent],
                 [],
                 [],
                 [],
                 [],
             )
 
-            for _ in range(imag_h):
-                probs = actor(zs[-1].detach())
-                dist = torch.distributions.Categorical(probs)
-                a_s = dist.sample()
-                logps.append(dist.log_prob(a_s))  # (B,)
-                entropies.append(dist.entropy())  # (B,)  ⬅︎ NEW
+            for _ in range(imagination_horizon):
+                action_probabilities = actor(latents[-1].detach())
+                action_distribution = torch.distributions.Categorical(
+                    action_probabilities
+                )
+                actions = action_distribution.sample()
+                log_probabilities.append(action_distribution.log_prob(actions))
+                entropies.append(action_distribution.entropy())
 
                 # --- push action token, predict next latent -----------------
                 roll = torch.cat(
                     [
-                        inp[:, -ctx * (N_PATCH + 1) :],
-                        (ACTION_ID_START + a_s).unsqueeze(1),
+                        input_tokens[:, -ctx * (N_PATCH + 1) :],
+                        (ACTION_ID_START + actions).unsqueeze(1),
                     ],
                     1,
                 )
                 ntok = wm(roll)[:, -1].argmax(-1, keepdim=True)
-                z_next = wm.tok(ntok).squeeze(1)  # (B,d)
-                zs.append(z_next)
+                next_latent = wm.tok(ntok).squeeze(1)  # (B, dim)
+                latents.append(next_latent)
 
-                prob_reward = expect_symlog(wm.reward_head(z_next))
+                prob_reward = expect_symlog(wm.reward_head(next_latent))
                 imagined_rewards.append(prob_reward)
 
-                prob_value = expect_symlog(critic(z_next.detach()))
+                prob_value = expect_symlog(critic(next_latent.detach()))
                 values.append(prob_value.detach())
 
-            B, T = values[0].size(0), len(values)
-            values = torch.stack(values, 1)  # (B,T)
-            imagined_rewards = torch.stack(imagined_rewards, 1)  # (B,T)
-            logps = torch.stack(logps, 1)  # (B,T)
-            entropies = torch.stack(entropies, 1)  # (B, T)
+            batch_size_now, time_horizon = values[0].size(0), len(values)
+            values = torch.stack(values, 1)
+            imagined_rewards = torch.stack(imagined_rewards, 1)
+            log_probabilities = torch.stack(log_probabilities, 1)
+            entropies = torch.stack(entropies, 1)
 
-            v_boot = expect_symlog(critic(zs[-1].detach()))
-            R = v_boot  # bootstrap
+            value_bootstrap = expect_symlog(critic(latents[-1].detach()))
+            running_return = value_bootstrap  # bootstrap
             returns = torch.zeros_like(imagined_rewards)
 
-            for t in reversed(range(T)):
-                R = imagined_rewards[:, t] + gamma * (
-                    (1 - lam_return) * values[:, t] + lam_return * R
+            for t in reversed(range(time_horizon)):
+                running_return = imagined_rewards[:, t] + gamma * (
+                    (1 - lam_return) * values[:, t] + lam_return * running_return
                 )
-                returns[:, t] = R
+                returns[:, t] = running_return
 
             with torch.no_grad():
                 r_symlog = returns.detach()
@@ -540,14 +544,15 @@ class Trainer:
                 return_scale.mul_(decay).add_((1 - decay) * S)
                 return_scale.clamp_(min=1.0)
 
-            adv = returns - values  # both are scalars now
-            norm_adv = adv / (return_scale + 1e-3)
+            advantage = returns - values
+            normalized_advantage = advantage / (return_scale + 1e-3)
             beta = 3e-4
             actor_loss = (
-                -(logps * norm_adv.detach()) - beta * entropies  # PG
-            ).mean()  # −β·H(π)
+                -(log_probabilities * normalized_advantage.detach())
+                - beta * entropies
+            ).mean()
 
-            val_logits = critic(zs[-1].detach())
+            val_logits = critic(latents[-1].detach())
             val_target = encode_two_hot(
                 returns[:, 0]
             )  # bootstrap λ-return per batch
