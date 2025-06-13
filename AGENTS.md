@@ -6,4 +6,4 @@
 
 ## Profile Instructions
 
-- Use `nsys profile` command to generate the report you need for profiling the code
+- Use `torch.profiler` context manager to generate the CPU or GPU report you need for profiling the code
