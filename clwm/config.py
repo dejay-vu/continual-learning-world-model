@@ -13,13 +13,6 @@ from typing import Any, Mapping
 
 import yaml
 
-_TRAINING_DEFAULTS: dict[str, Any] = {
-    "batch_size": 256,
-    "replay_size": 30_000,
-    "sample_ratio": 0.2,
-}
-
-
 # -------------------------------------------------------------------------
 # Private view class ------------------------------------------------------
 # -------------------------------------------------------------------------
@@ -208,12 +201,5 @@ class Config(_ConfigView):
         with open(path, "r", encoding="utf-8") as fh:
             cfg: dict[str, Any] = yaml.safe_load(fh)
 
-        # Merge hard-coded *training* defaults -------------------------
-        cfg.setdefault("training", {}).update(
-            {
-                k: v
-                for k, v in _TRAINING_DEFAULTS.items()
-                if k not in cfg.get("training", {})
-            }
-        )
+        cfg.setdefault("training", {})
         return cfg
