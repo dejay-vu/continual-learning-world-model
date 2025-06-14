@@ -8,8 +8,6 @@ model:
     200m: {dim: 768,  layers: 16, heads: 12}  # ≈ 200 M
     500m: {dim: 1024, layers: 24, heads: 16}  # ≈ 500 M
 
-  # Which of the above sizes to use when the user does *not* supply
-  # --size on the command-line.  Must be a key present under *sizes*.
   default: 5m
 
 training:
@@ -34,4 +32,4 @@ training:
   # memory when creating a batch via ``Replay.sample_mixed``.
   sample_ratio: 0.2
 
-  evaluation_interval: 1
+  evaluation_interval: 10

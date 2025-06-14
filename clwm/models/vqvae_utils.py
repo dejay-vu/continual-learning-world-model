@@ -57,9 +57,9 @@ def frames_to_indices(
     batch_size : int, default 2048
         Mini-batch size processed by the encoder (trades memory for speed).
     device : torch.device | str | None, default *None*
-        • ``None``  – behave exactly like the previous implementation and
+        • ``None``  - behave exactly like the previous implementation and
           return a *numpy* array on the CPU (backwards-compatible).
-        • else      – return a *torch.Tensor* residing on the given device.
+        • else      - return a *torch.Tensor* residing on the given device.
 
     Returns
     -------
@@ -72,7 +72,7 @@ def frames_to_indices(
         device = TORCH_DEVICE  # internal workspace for encoder
 
     ids_list: list[torch.Tensor] = []
-    use_fp16 = torch.cuda.is_available() and (device == "cuda" or str(device).startswith("cuda"))
+    use_fp16 = device == "cuda" or str(device).startswith("cuda")
 
     for i in range(0, len(frames_u8), batch_size):
         batch = frames_u8[i : i + batch_size]
@@ -84,7 +84,9 @@ def frames_to_indices(
         x = x.permute(0, 3, 1, 2) / 255.0
         x = F.interpolate(x, (RES, RES), mode="bilinear", align_corners=False)
 
-        with torch.autocast("cuda" if device == "cuda" else "cpu", dtype=x.dtype):
+        with torch.autocast(
+            "cuda" if device == "cuda" else "cpu", dtype=x.dtype
+        ):
             lat = vqvae.enc(x)
             _, ids, _ = vqvae.vq(lat.flatten(0, 1))
 

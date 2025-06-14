@@ -71,10 +71,7 @@ class Replay:
         # when a CUDA device is available so that CPU-only execution remains
         # unaffected.
 
-        if torch.cuda.is_available():
-            self._encode_mgr = StreamManager()
-        else:
-            self._encode_mgr = None
+        self._encode_mgr = StreamManager()
 
     # ------------------------------------------------------------------
     # Basic container operations

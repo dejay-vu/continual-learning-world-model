@@ -1,6 +1,6 @@
 """Project-wide constants and math helpers.
 
-The contents were previously hidden inside ``clwm/utils/common`` – moving
+The contents were previously hidden inside ``clwm/utils/common`` - moving
 them into a dedicated *top-level* module removes the need for the generic
 ``utils`` package and makes the public API clearer.
 """

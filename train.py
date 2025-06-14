@@ -3,8 +3,8 @@
 
 The script now delegates **all** heavy-lifting to reusable components:
 
-• Command-line parsing & YAML handling – handled by :class:`clwm.Config`.
-• Network instantiation, task scheduling, training – handled by
+• Command-line parsing & YAML handling - handled by :class:`clwm.Config`.
+• Network instantiation, task scheduling, training - handled by
   :class:`clwm.Trainer`.
 
 Keeping the entry-point slim makes experimentation easier while retaining the
@@ -18,20 +18,13 @@ import torch
 # Fast fail when the host lacks CUDA – behaviour unchanged from original
 if not torch.cuda.is_available():
     raise SystemExit(
-        "CUDA device not available – training requires an NVIDIA GPU."
+        "CUDA device not available - training requires an NVIDIA GPU."
     )
-
-# ------------------------------------------------------------------
-# High-level orchestration ------------------------------------------
-# ------------------------------------------------------------------
-
-# All heavy dependencies are *deep* inside clwm; importing after the CUDA check
-# avoids unnecessary start-up cost on unsupported machines.
 
 from clwm import Config, Trainer  # noqa: E402 – after torch check
 
 
-def main() -> None:  # noqa: D401 – script entry-point
+def main() -> None:
     # The helper returns (cfg, args) but we only need the config object.
     cfg, _ = Config.from_cli()
 

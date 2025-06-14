@@ -22,7 +22,7 @@ import torch
 class AsyncExecutor:
     """Run *fn* in a dedicated background thread.
 
-    The executor is **fire-and-forget** – once started the underlying thread
+    The executor is **fire-and-forget** - once started the underlying thread
     stays alive until the provided callable returns *or* the instance is
     explicitly :pyfunc:`stop`ped.  The abstraction is intentionally minimal
     so that switching to a standard ``ThreadPoolExecutor`` in the future
@@ -53,7 +53,9 @@ class AsyncExecutor:
         if not self._thread.is_alive():
             self._thread.start()
 
-    def stop(self, join: bool = False, timeout: Optional[float] = None) -> None:
+    def stop(
+        self, join: bool = False, timeout: Optional[float] = None
+    ) -> None:
         """Signal the worker to terminate and optionally *join* it."""
 
         self._stop_event.set()
@@ -80,11 +82,8 @@ class StreamManager:
     __slots__ = ("stream",)
 
     def __init__(self, device: int | str | torch.device | None = None):
-        if torch.cuda.is_available():
-            device = torch.cuda.current_device() if device is None else device
-            self.stream = torch.cuda.Stream(device=device)
-        else:
-            self.stream = None
+        device = torch.cuda.current_device() if device is None else device
+        self.stream = torch.cuda.Stream(device=device)
 
     # ------------------------------------------------------------------
     # Convenience wrappers ---------------------------------------------
@@ -95,8 +94,7 @@ class StreamManager:
 
         The helper blocks the *caller* stream afterwards so the returned
         tensors are always safe to use without additional synchronisation
-        calls.  On CPU-only setups the function simply executes *fn*
-        directly.
+        calls.
         """
 
         if self.stream is None:
@@ -124,15 +122,14 @@ class StreamManager:
     # Context management ------------------------------------------------
     # ------------------------------------------------------------------
 
-    def __enter__(self):  # noqa: D401
-        if self.stream is not None:
-            self._prev_stream = torch.cuda.current_stream()
-            torch.cuda.set_stream(self.stream)
+    def __enter__(self):
+        self._prev_stream = torch.cuda.current_stream()
+        torch.cuda.set_stream(self.stream)
+
         return self
 
     def __exit__(self, exc_type, exc, tb):  # noqa: D401
-        if self.stream is not None:
-            torch.cuda.set_stream(self._prev_stream)  # type: ignore[attr-defined]
+        torch.cuda.set_stream(self._prev_stream)  # type: ignore[attr-defined]
 
     # ------------------------------------------------------------------
     # Convenience helpers ----------------------------------------------

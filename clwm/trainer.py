@@ -1,6 +1,6 @@
 """High-level training driver for **Continual-Learning World Models**.
 
-This class was previously buried inside ``clwm/utils`` – moving it into a
+This class was previously buried inside ``clwm/utils`` - moving it into a
 dedicated *top-level* module makes the public API more discoverable and keeps
 the directory tree free from generic *utils* packages.
 """
@@ -149,7 +149,7 @@ class Trainer:
         # Pick **one** random game for evaluation ---------------------
         if len(train_tasks) == 0:
             raise ValueError(
-                "Expanded training task list is empty – cannot select evaluation game"
+                "Expanded training task list is empty - cannot select evaluation game"
             )
 
         eval_game = random.choice(train_tasks)
@@ -218,7 +218,7 @@ class Trainer:
         return torch.cat(seqs)
 
     def evaluate_on_sequences(self, seqs: torch.Tensor):
-        """Return CE ‑ (extrinsic) reward tuple for *seqs*."""
+        """Return CE - (extrinsic) reward tuple for *seqs*."""
 
         if seqs.numel() == 0:
             return 0.0, 0.0
@@ -280,9 +280,9 @@ class Trainer:
         The implementation is largely identical to the original research
         code but has been refactored to be
 
-        1. **self-contained** – all parameters are explicitly unpacked from
+        1. **self-contained** - all parameters are explicitly unpacked from
            *kwargs* which prevents accidental *NameError*s.
-        2. **robust on CPU-only machines** – CI environments (including
+        2. **robust on CPU-only machines** - CI environments (including
            the one used for the exercises on which this repository is based)
            rarely provide a CUDA enabled GPU.  The heavy CUDA specific code
            paths are therefore gated behind a simple availability check so
@@ -320,19 +320,6 @@ class Trainer:
         game: str | None = kwargs.pop("game", None)
 
         # ------------------------------------------------------------------
-        # CPU fallback ------------------------------------------------------
-        # ------------------------------------------------------------------
-        # Skip the heavy training loop when no CUDA device is present.  This
-        # allows unit tests to import and exercise the *Trainer* logic in
-        # CPU-only environments.
-        # ------------------------------------------------------------------
-
-        if not torch.cuda.is_available():
-            # Pretend a successful training run – return dummy cross-entropy
-            # so that upstream code requiring a float proceeds as usual.
-            return 0.0
-
-        # ------------------------------------------------------------------
         # Helper constants & state -----------------------------------------
         # ------------------------------------------------------------------
 
@@ -350,17 +337,9 @@ class Trainer:
         opt_act = Adam(actor.parameters(), 4e-4)
         opt_cri = Adam(critic.parameters(), 4e-4)
 
-        # Newer PyTorch versions (2.2+) removed the *device* kw-arg – fall back
-        # to the simplified constructor when it is not supported.
-        try:
-            scaler = GradScaler(enabled=torch.cuda.is_available())
-        except TypeError:  # legacy torch <2.0 would never reach here
-            scaler = GradScaler(device="cuda", enabled=True)  # type: ignore[arg-type]
+        scaler = GradScaler(device="cuda", enabled=True)
 
         loss_history: list[float] = []
-
-        pbar_desc = f"Learning {game}" if game is not None else "Training"
-        pbar = tqdm(total=epochs, desc=pbar_desc)
 
         # ------------------------------------------------------------------
         # 0) Launch a *persistent* background collector that keeps the replay
@@ -387,7 +366,7 @@ class Trainer:
         collector.start()
 
         # ------------------------------------------------------------------
-        # Data pre-fetching & double buffering using *StreamManager* ---------
+        # Data pre-fetching & double buffering using *StreamManager*
 
         copy_mgr = StreamManager()
 
@@ -430,6 +409,9 @@ class Trainer:
         reward_env_tensor = torch.tensor(
             rewards, dtype=torch.float16, device=TORCH_DEVICE
         )
+
+        pbar_desc = f"Learning {game}" if game is not None else "Training"
+        pbar = tqdm(total=epochs, desc=pbar_desc)
 
         while len(loss_history) < epochs:
 
