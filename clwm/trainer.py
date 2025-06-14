@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from pathlib import Path
+from random import choice, shuffle
 from typing import Any, List
 
 import numpy as np
@@ -57,12 +58,12 @@ class Trainer:
         # Store *full* config for later access (evaluation, logging, …)
         self.raw_cfg = cfg
 
-        self.model_cfg: dict[str, Any] = cfg.get("model", {})
-        self.training_cfg: dict[str, Any] = cfg.get("training", {})
-        self.cli_args: dict[str, Any] = cfg.get("cli", {})
+        self.model_cfg: dict[str, Any] = cfg["model"]
+        self.train_cfg: dict[str, Any] = cfg["train"]
+        self.cli_args: dict[str, Any] = cfg["cli"]
 
         # Reproducibility ---------------------------------------------
-        set_global_seed(self.cli_args.get("seed", 1))
+        set_global_seed(self.cli_args.get("seed", 0))
 
         # Instantiate networks ----------------------------------------
         self.wm, self.actor, self.critic = self._build_networks()
@@ -90,10 +91,10 @@ class Trainer:
         losses: list[float] = []
 
         # Build one shared replay buffer -------------------------------
-        replay = Replay(cap=self.training_cfg.get("replay_size", 30_000))
+        replay = Replay(cap=self.train_cfg["replay_size"])
 
-        for game in tasks:
-            loss = self._train_single_task(game, replay)
+        for task in tasks:
+            loss = self._train_single_task(task, replay)
             losses.append(float(loss))
 
             # Periodic evaluation -----------------------------------
@@ -110,58 +111,49 @@ class Trainer:
         # CLI dictionary is always present (see Config.from_cli)
         cli = self.cli_args
 
-        import random
-
-        train_flags: list[str] = cli.get("categories", []) or []
-        zero_shot: bool = bool(cli.get("zero_shot", False))
-
-        if not train_flags:
-            raise ValueError(
-                "No training categories specified via --categories flag"
-            )
+        selected_categories: list[str] = cli["categories"]
+        zero_shot: bool = bool(cli["zero_shot"])
 
         # ----------------------------- load mapping ------------------
-        categories_path = Path(__file__).resolve().parent.parent / "atari.yaml"
-        with open(categories_path, "r", encoding="utf-8") as fh:
-            cat_cfg = yaml.safe_load(fh)
+        atari_list_path = Path(__file__).resolve().parent.parent / "atari.yaml"
+        with open(atari_list_path, "r", encoding="utf-8") as f:
+            atari_list = yaml.safe_load(f)
 
-        cat_map: dict[str, list[str]] = cat_cfg.get("categories", {})
+        all_categories: dict[str, list[str]] = atari_list["categories"]
 
         # Validate that every CLI token refers to a *known* category --------
-        unknown = [tok for tok in train_flags if tok not in cat_map]
-        if unknown:
-            avail = ", ".join(sorted(cat_map))
+        unknown_categories = [
+            selected_category
+            for selected_category in selected_categories
+            if selected_category not in all_categories
+        ]
+        if unknown_categories:
+            available = ", ".join(sorted(all_categories))
             raise ValueError(
                 "Unknown --categories value(s): "
-                + ", ".join(unknown)
-                + f". Allowed categories: {avail}"
+                + ", ".join(unknown_categories)
+                + f". Allowed categories: {available}"
             )
 
-        # Flatten selected categories into a list of games ------------------
-        def _expand(flags: list[str]):
-            games: list[str] = []
-            for token in flags:
-                games.extend(cat_map[token])
-            return games
+        train_tasks = [
+            game
+            for selected_category in selected_categories
+            for game in all_categories[selected_category]
+        ]
 
-        train_tasks = _expand(train_flags)
+        eval_task = choice(train_tasks)
 
-        # Pick **one** random game for evaluation ---------------------
+        if zero_shot:
+            train_tasks.remove(eval_task)
+
+        shuffle(train_tasks)
+
         if len(train_tasks) == 0:
             raise ValueError(
                 "Expanded training task list is empty - cannot select evaluation game"
             )
 
-        eval_game = random.choice(train_tasks)
-
-        if zero_shot:
-            # Remove the held-out game from the training list so that it is
-            # never seen during optimisation.
-            train_tasks = [g for g in train_tasks if g != eval_game]
-
-        eval_tasks = [eval_game]
-
-        return train_tasks, eval_tasks
+        return train_tasks, [eval_task]
 
     # ------------------------------------------------------------------
     # Evaluation helpers ----------------------------------------------
@@ -176,7 +168,7 @@ class Trainer:
     def build_evaluation_sequences(self, games: Iterable[str]):
         """Generate rollouts using the *current* policy network."""
 
-        cfg = self.training_cfg
+        cfg = self.train_cfg
         context_length = cfg["context_length"]
 
         seqs: list[torch.Tensor] = []
@@ -242,7 +234,7 @@ class Trainer:
     def _train_single_task(self, game: str, replay: Replay) -> float:
         """Run optimisation for *one* Atari game and return the final CE."""
 
-        cfg = self.training_cfg
+        cfg = self.train_cfg
 
         loss = self._train_single_task_loop(
             game=game,
