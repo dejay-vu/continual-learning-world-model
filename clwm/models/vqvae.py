@@ -3,13 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from vector_quantize_pytorch import VectorQuantize
 
-# -------------- config ----------------
-D_LAT = 64  # latent dimension
-RES = 84  # resolution of the input images
-PATCH = 16  # patch size for the VQ-VAE
-H16 = W16 = RES // PATCH  # 5×5 → 25 tokens
-K = 128  # number of VQ codes
-EMA = 0.9  # decay for the EMA in VectorQuantize
+from ..common import D_LAT, EMA, H16, RES, W16, K
 
 
 # --------- tiny CNN encoder/decoder ---
@@ -64,7 +58,7 @@ class Decoder(nn.Module):
 
 # -------------- VQ-VAE -----------------
 class VQVAE(nn.Module):
-    """Lightweight VQ‑VAE used for frame tokenisation."""
+    """Lightweight VQ-VAE used for frame tokenisation."""
 
     def __init__(self) -> None:
         super().__init__()

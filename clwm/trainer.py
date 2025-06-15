@@ -1,12 +1,3 @@
-"""High-level training driver for **Continual-Learning World Models**.
-
-This class was previously buried inside ``clwm/utils`` - moving it into a
-dedicated *top-level* module makes the public API more discoverable and keeps
-the directory tree free from generic *utils* packages.
-"""
-
-from __future__ import annotations
-
 from collections.abc import Iterable
 from pathlib import Path
 from random import choice, shuffle
@@ -14,35 +5,26 @@ from typing import Any, List
 
 import numpy as np
 import torch
+import yaml
 from torch.optim import Adam
-from torch.amp import autocast, GradScaler
 from tqdm import tqdm
 
-import yaml
-
-from .env.atari_envs import make_atari_vectorized_envs
-from .models.vqvae_utils import frames_to_indices, vqvae
-
-from .models.world_model import (
-    WorldModel,
-    ActorNetwork,
-    CriticNetwork,
-    Replay,
-)
-from .models.vqvae import H16, W16, K
-
 from .common import (
-    TORCH_DEVICE,
     ACTION_ID_START,
+    TORCH_DEVICE,
     encode_two_hot,
     expect_symlog,
-    split_cross_entropy,
-    symexp,
     fisher_diagonal,
     set_global_seed,
+    split_cross_entropy,
+    symexp,
 )
-
 from .concurrency import AsyncExecutor, StreamManager
+from .env.atari_envs import make_atari_vectorized_envs
+from .models.replay import Replay
+from .models.vqvae import H16, W16
+from .models.vqvae_utils import frames_to_indices, vqvae
+from .models.world_model import ActorNetwork, CriticNetwork, WorldModel
 
 
 class Trainer:
@@ -69,8 +51,8 @@ class Trainer:
         self.wm, self.actor, self.critic = self._build_networks()
 
         # Book-keeping needed for EWC ----------------------------------
-        self._running_weights = None
-        self._running_fisher = None
+        self._running_weights: list[torch.Tensor] = []
+        self._running_fisher: list[torch.Tensor] = []
 
     # ------------------------------------------------------------------
     # Public API -------------------------------------------------------
@@ -81,7 +63,7 @@ class Trainer:
         tasks: Iterable[str] | None = None,
         *,
         evaluation_games: Iterable[str] | None = None,
-        eval_interval: int | None = None,
+        eval_interval: int | None = 1,
     ) -> List[float]:
         """Train on *tasks* or derive them from *cli* flags."""
 
@@ -170,18 +152,18 @@ class Trainer:
 
         cfg = self.train_cfg
         context_length = cfg["context_length"]
+        num_envs = cfg["num_envs"]
 
         seqs: list[torch.Tensor] = []
 
         for game in games:
             envs = make_atari_vectorized_envs(
                 game,
-                num_envs=cfg.get("eval_envs", 16),
-                render_mode=None,
+                num_envs=num_envs,
             )
 
             obs, _ = envs.reset()
-            done = np.zeros(len(envs), dtype=bool)
+            done = np.zeros(num_envs, dtype=bool)
 
             # Collect rollout ---------------------------------------
             while not done.all():
@@ -190,7 +172,7 @@ class Trainer:
 
                 # Build (T, L) token sequence: image + padding (actions)
                 seq = torch.full(
-                    (len(envs), context_length),
+                    (num_envs, context_length),
                     ACTION_ID_START,  # dummy action tokens
                     dtype=torch.long,
                     device=TORCH_DEVICE,
@@ -262,58 +244,28 @@ class Trainer:
 
         return float(loss)
 
-    # The following helpers simply wrap the lower-level implementation
-    # from *wm.py* to avoid code duplication. Keeping the delegation in
-    # one place makes it easier to replace the underlying logic later.
-
-    def _train_single_task_loop(self, *args, **kwargs):  # noqa: D401 – proxy
-        """Low-level optimisation loop for a **single** Atari task.
-
-        The implementation is largely identical to the original research
-        code but has been refactored to be
-
-        1. **self-contained** - all parameters are explicitly unpacked from
-           *kwargs* which prevents accidental *NameError*s.
-        2. **robust on CPU-only machines** - CI environments (including
-           the one used for the exercises on which this repository is based)
-           rarely provide a CUDA enabled GPU.  The heavy CUDA specific code
-           paths are therefore gated behind a simple availability check so
-           that the public API remains usable without a GPU.
-        """
-
-        # ------------------------------------------------------------------
-        # Argument unpacking ------------------------------------------------
-        # ------------------------------------------------------------------
-
-        wm: WorldModel = kwargs.pop("wm")
-        actor: ActorNetwork = kwargs.pop("actor")
-        critic: CriticNetwork = kwargs.pop("critic")
-        replay: Replay = kwargs.pop("replay")
-
-        # Training hyper-parameters ---------------------------------------
-        epochs: int = kwargs.pop("epochs")
-        context_length: int = kwargs.pop("context_length")
-        imagination_horizon: int = kwargs.pop("imagination_horizon")
-        gamma: float = kwargs.pop("gamma")
-        lam_return: float = kwargs.pop("lam_return")
-        lam: float = kwargs.pop("lam")
-
-        running_weights = kwargs.pop("running_weights")
-        running_fisher = kwargs.pop("running_fisher")
-
-        online_steps: int = kwargs.pop("online_steps")
-        num_envs: int = kwargs.pop("num_envs")
-        min_prefill: int = kwargs.pop(
-            "min_prefill"
-        )  # noqa: F841 – kept for parity
-        batch_size: int = kwargs.pop("batch_size")
-        sample_ratio: float = kwargs.pop("sample_ratio")
-
-        game: str | None = kwargs.pop("game", None)
-
-        # ------------------------------------------------------------------
-        # Helper constants & state -----------------------------------------
-        # ------------------------------------------------------------------
+    def _train_single_task_loop(
+        self,
+        game: str,
+        wm: WorldModel,
+        actor: ActorNetwork,
+        critic: CriticNetwork,
+        replay: Replay,
+        epochs: int,
+        context_length: int,
+        imagination_horizon: int,
+        gamma: float,
+        lam_return: float,
+        lam: float,
+        running_weights,
+        running_fisher,
+        online_steps: int,
+        num_envs: int,
+        min_prefill: int,
+        batch_size: int,
+        sample_ratio: float,
+    ):
+        """Run the training loop for *epochs* iterations."""
 
         N_PATCH = H16 * W16  # 25 for 84×84 input images with 16-pixel patches
 
@@ -329,7 +281,7 @@ class Trainer:
         opt_act = Adam(actor.parameters(), 4e-4)
         opt_cri = Adam(critic.parameters(), 4e-4)
 
-        scaler = GradScaler(device="cuda", enabled=True)
+        scaler = torch.GradScaler()
 
         loss_history: list[float] = []
 
@@ -432,7 +384,7 @@ class Trainer:
             target_tokens = batch[:, 1:].reshape(batch_size_now, -1)
 
             # ----- forward pass under mixed precision -------------------
-            with autocast(device_type="cuda", dtype=torch.float16):
+            with torch.autocast(device_type="cuda", dtype=torch.float16):
                 logits, kl, hidden_states = wm(
                     input_tokens, return_ent=True, return_reward=True
                 )
@@ -568,8 +520,8 @@ class Trainer:
             scaler.step(opt_cri)
             scaler.update()
 
-            for b in wm.blocks:
-                b.tau.mul_(0.90).clamp_(min=0.02)
+            for block in wm.blocks:
+                block.tau.mul_(0.90).clamp_(min=0.02)
 
             loss_history.append(loss.item())
 
@@ -660,6 +612,6 @@ class Trainer:
         }
 
         wm = WorldModel(**wm_kwargs).to(TORCH_DEVICE)
-        actor = ActorNetwork(dim=dim).to(TORCH_DEVICE)
-        critic = CriticNetwork(dim=dim).to(TORCH_DEVICE)
+        actor = ActorNetwork(dim).to(TORCH_DEVICE)
+        critic = CriticNetwork(dim).to(TORCH_DEVICE)
         return wm, actor, critic

@@ -32,4 +32,6 @@ train:
   # memory when creating a batch via ``Replay.sample_mixed``.
   sample_ratio: 0.2
 
-  evaluation_interval: 10
+  evaluation_interval: 1
+  num_envs: 16
+  

@@ -5,17 +5,11 @@ module and moved into a *top-level* file to avoid the now removed
 ``utils`` package.
 """
 
-from __future__ import annotations
-
 import argparse
 from pathlib import Path
 from typing import Any, Mapping
 
 import yaml
-
-# -------------------------------------------------------------------------
-# Private view class ------------------------------------------------------
-# -------------------------------------------------------------------------
 
 
 class _ConfigView:

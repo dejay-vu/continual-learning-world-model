@@ -11,7 +11,6 @@ Keeping the entry-point slim makes experimentation easier while retaining the
 familiar ``python train.py --categories action`` interface.
 """
 
-from __future__ import annotations
 
 import torch
 

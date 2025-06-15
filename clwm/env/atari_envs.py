@@ -1,15 +1,17 @@
-import gymnasium as gym
-from gymnasium.wrappers import TransformReward
 import ale_py
-from ..common import symlog
+import gymnasium as gym
+import numpy as np
+from gymnasium.wrappers import TransformReward
+
+from ..common import np_symlog
 
 gym.register_envs(ale_py)
 
 
-def wrap_reward_symlog(env: gym.Env) -> gym.Env:
+def wrap_reward_symlog(env: gym.Env) -> gym.Wrapper:
     """Return a wrapper that applies :func:`symlog` to rewards."""
 
-    return TransformReward(env, lambda r: symlog(r))
+    return TransformReward(env, lambda r: np_symlog(np.asarray(r)))
 
 
 def make_atari_env(

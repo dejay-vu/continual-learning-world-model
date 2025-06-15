@@ -5,18 +5,11 @@ that is reused across the project.  A small abstraction layer keeps the
 implementation lightweight while providing a clean public API.
 """
 
-from __future__ import annotations
-
 import threading
 from collections.abc import Callable
-from typing import Any, Iterable, Optional
+from typing import Any, Optional
 
 import torch
-
-
-# -------------------------------------------------------------------------
-# Threading helpers -------------------------------------------------------
-# -------------------------------------------------------------------------
 
 
 class AsyncExecutor:
@@ -83,7 +76,9 @@ class StreamManager:
 
     def __init__(self, device: int | str | torch.device | None = None):
         device = torch.cuda.current_device() if device is None else device
-        self.stream = torch.cuda.Stream(device=device)
+        self.stream: torch.cuda.Stream = torch.cuda.Stream(
+            device=device
+        )  # type: ignore
 
     # ------------------------------------------------------------------
     # Convenience wrappers ---------------------------------------------
@@ -123,7 +118,7 @@ class StreamManager:
     # ------------------------------------------------------------------
 
     def __enter__(self):
-        self._prev_stream = torch.cuda.current_stream()
+        self._prev_stream = torch.cuda.current_stream()  # type: ignore[attr-defined]
         torch.cuda.set_stream(self.stream)
 
         return self
@@ -135,7 +130,7 @@ class StreamManager:
     # Convenience helpers ----------------------------------------------
     # ------------------------------------------------------------------
 
-    def wait_for(self, *streams: "StreamManager | torch.cuda.Stream") -> None:  # type: ignore[name-defined]
+    def wait_for(self, *streams: "StreamManager | torch.cuda.Stream") -> None:
         """Block *this* stream until *streams* have completed."""
 
         if self.stream is None:

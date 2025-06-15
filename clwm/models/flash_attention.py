@@ -1,34 +1,14 @@
 import torch
 import torch.nn as nn
-
-try:
-    from flash_attn.layers.rotary import RotaryEmbedding
-    from flash_attn import flash_attn_qkvpacked_func
-
-    FLASH_ATTENTION_AVAILABLE = True
-except Exception:  # pragma: no cover - optional dependency may be missing
-    FLASH_ATTENTION_AVAILABLE = False
-
-    class RotaryEmbedding(nn.Module):
-        """Fallback rotary embedding that simply returns the input."""
-
-        def __init__(self, dim: int):  # noqa: D401 - simple placeholder
-            super().__init__()
-            self.dim = dim
-
-        def forward(self, x, *_, **__):  # noqa: D401 - simple placeholder
-            return x
-
-    def flash_attn_qkvpacked_func(*args, **kwargs):  # noqa: D401 - placeholder
-        raise NotImplementedError("flash_attn is not installed")
-
+from flash_attn import flash_attn_qkvpacked_func
+from flash_attn.layers.rotary import RotaryEmbedding
 
 from .lora_layer import LoRA
 
 
 class FlashAttentionBlock(nn.Module):
-    """Multi‑head self‑attention + MLP with Flash‑Attention backend,
-    plus LoRA adapters and a routing mechanism. Drop‑in replacement
+    """Multi-head self-attention + MLP with Flash-Attention backend,
+    plus LoRA adapters and a routing mechanism. Drop-in replacement
     for your original Block, preserving add() and return of (x, g).
     """
 
@@ -57,9 +37,7 @@ class FlashAttentionBlock(nn.Module):
 
         proj_dtype = torch.float32
 
-        self.qkv = nn.Linear(
-            dim, 3 * dim, bias=False, dtype=proj_dtype
-        )
+        self.qkv = nn.Linear(dim, 3 * dim, bias=False, dtype=proj_dtype)
         self.o_proj = nn.Linear(dim, dim, bias=False, dtype=proj_dtype)
 
         # Feed‑forward network
@@ -86,7 +64,7 @@ class FlashAttentionBlock(nn.Module):
         # Temperature for routing softmax
         self.register_buffer("tau", torch.tensor(1.0))
 
-    def add(self):
+    def add_adapter(self):
         """Add a new adapter and expand router outputs by 1."""
         device = self.router.weight.device
         # Append new LoRA adapter
@@ -94,9 +72,11 @@ class FlashAttentionBlock(nn.Module):
         # Expand router weight/bias
         old_out, d_in = self.router.out_features, self.router.in_features
         new_router = nn.Linear(d_in, old_out + 1, device=device)
+
         with torch.no_grad():
             new_router.weight[:old_out] = self.router.weight
             new_router.bias[:old_out] = self.router.bias
+
         self.router = new_router
 
     def forward(self, x: torch.Tensor):  # x: (B, L, D)
@@ -104,59 +84,31 @@ class FlashAttentionBlock(nn.Module):
 
         resid = x
 
-        if FLASH_ATTENTION_AVAILABLE and x.is_cuda:
-            # ---- Fast path using flash-attn --------------------------------
-            # Compute raw QKV – cast to fp16 if autocast is active to avoid
-            # reallocating a fp32 buffer that would immediately be down-cast.
-            qkv = self.qkv(x)  # (B, L, 3*D) — already fp16 under autocast
-            qkv = qkv.view(bsz, seqlen, 3, self.heads, self.head_dim)
+        # ---- Fast path using flash-attn --------------------------------
+        # Compute raw QKV – cast to fp16 if autocast is active to avoid
+        # reallocating a fp32 buffer that would immediately be down-cast.
+        qkv = self.qkv(x)  # (B, L, 3*D) — already fp16 under autocast
+        qkv = qkv.view(bsz, seqlen, 3, self.heads, self.head_dim)
 
-            # Rotary positional embedding (GPU-only path). The upstream
-            # implementation from flash_attn fails when tensors are on CPU
-            # because it unconditionally enters a CUDA context. We therefore
-            # restrict its usage to CUDA tensors.
-            qkv_rot = self.rope(
-                qkv, None, seqlen_offset=0, num_heads_q=self.heads
-            )
-            qkv_rot = qkv_rot.to(torch.float16)
+        # Rotary positional embedding (GPU-only path). The upstream
+        # implementation from flash_attn fails when tensors are on CPU
+        # because it unconditionally enters a CUDA context. We therefore
+        # restrict its usage to CUDA tensors.
+        qkv_rot = self.rope(qkv, None, seqlen_offset=0, num_heads_q=self.heads)
+        qkv_rot = qkv_rot.to(torch.float16)
 
-            # FlashAttention kernel (causal)
-            y = flash_attn_qkvpacked_func(
-                qkv_rot,
-                dropout_p=self.attn_dropout.p if self.training else 0.0,
-                causal=True,
-                softmax_scale=None,
-            )  # (B, L, H, D)
+        # FlashAttention kernel (causal)
+        y = flash_attn_qkvpacked_func(
+            qkv_rot,
+            dropout_p=self.attn_dropout.p if self.training else 0.0,
+            causal=True,
+            softmax_scale=None,
+        )
 
-            y = y.to(x.dtype)
+        y = y.to(x.dtype)  # type: ignore
 
-            y = y.reshape(bsz, seqlen, -1)
-            y = self.o_proj(y)
-
-        else:
-            # ---- Fallback using scaled-dot-product attention ----------------
-            qkv = self.qkv(x)  # (B, L, 3*D)
-            q, k, v = qkv.chunk(3, dim=-1)
-
-            # Reshape to (B, H, L, D)
-            q = q.view(bsz, seqlen, self.heads, self.head_dim).transpose(1, 2)
-            k = k.view(bsz, seqlen, self.heads, self.head_dim).transpose(1, 2)
-            v = v.view(bsz, seqlen, self.heads, self.head_dim).transpose(1, 2)
-
-            # PyTorch 2.0+ provides an efficient (though non-flash) CPU
-            # implementation of scaled-dot-product attention that is much more
-            # memory-friendly than manually materialising the full attention
-            # matrix. We leverage it here with causal masking enabled.
-            y = torch.nn.functional.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=None,
-                dropout_p=self.attn_dropout.p if self.training else 0.0,
-                is_causal=True,
-            )  # (B, H, L, D)
-            y = y.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
-            y = self.o_proj(y)
+        y = y.reshape(bsz, seqlen, -1)
+        y = self.o_proj(y)
 
         # Post-attention residual connection + LayerNorm
         x2 = self.ln1(resid + self.attn_dropout(y))

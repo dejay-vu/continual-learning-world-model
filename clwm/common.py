@@ -5,10 +5,7 @@ them into a dedicated *top-level* module removes the need for the generic
 ``utils`` package and makes the public API clearer.
 """
 
-from __future__ import annotations
-
 import random
-from typing import Any
 
 import numpy as np
 import torch
@@ -17,8 +14,13 @@ import torch
 # VQ-VAE / tokeniser constants -------------------------------------------
 # -------------------------------------------------------------------------
 
+D_LAT = 64  # latent dimension
+RES = 84  # resolution of the input images
+PATCH = 16  # patch size for the VQ-VAE
+H16 = W16 = RES // PATCH  # 5×5 → 25 tokens
+K = 128  # number of VQ codes
+EMA = 0.9  # decay for the EMA in VectorQuantize
 
-from .models.vqvae import K  # pylint: disable=cyclic-import
 
 MAX_ACTIONS = 18  # Max Atari action-space size
 ACTION_ID_START = K  # First action id (128)
@@ -41,16 +43,16 @@ def set_global_seed(seed: int = 0) -> None:
     random.seed(seed)
 
 
-def symlog(x: Any):
-    if isinstance(x, torch.Tensor):
-        return torch.sign(x) * torch.log1p(torch.abs(x))
+def symlog(x: torch.Tensor) -> torch.Tensor:
+    return torch.sign(x) * torch.log1p(torch.abs(x))
+
+
+def np_symlog(x: np.ndarray) -> np.ndarray:
     return np.sign(x) * np.log1p(np.abs(x))
 
 
-def symexp(x: Any):
-    if isinstance(x, torch.Tensor):
-        return torch.sign(x) * (torch.exp(torch.abs(x)) - 1)
-    return np.sign(x) * (np.expm1(np.abs(x)))
+def symexp(x: torch.Tensor) -> torch.Tensor:
+    return torch.sign(x) * (torch.exp(torch.abs(x)) - 1)
 
 
 # -------------------------------------------------------------------------
@@ -58,7 +60,7 @@ def symexp(x: Any):
 # -------------------------------------------------------------------------
 
 
-_BIN_VALUES = torch.arange(-20, 21, dtype=torch.float32)
+_BIN_VALUES = torch.linspace(-20.0, 20.0, 255, dtype=torch.float32)
 REWARD_BINS = _BIN_VALUES  # CPU-resident baseline copy
 _BINS_CACHE: dict[str, torch.Tensor] = {}
 
@@ -66,25 +68,27 @@ _BINS_CACHE: dict[str, torch.Tensor] = {}
 def _get_reward_bins(device: torch.device | str) -> torch.Tensor:  # noqa: D401
     key = str(device)
     cached = _BINS_CACHE.get(key)
+
     if cached is None:
         cached = REWARD_BINS.to(device)
         _BINS_CACHE[key] = cached
+
     return cached
 
 
-def unimix(logits: torch.Tensor, p: float = 0.01):
+def unimix(logits: torch.Tensor, p: float = 0.01) -> torch.Tensor:
     probs = torch.softmax(logits, -1)
     return probs * (1 - p) + p / len(_get_reward_bins(logits.device))
 
 
-def unimix_generic(logits: torch.Tensor, p: float = 0.01):
+def unimix_generic(logits: torch.Tensor, p: float = 0.01) -> torch.Tensor:
     probs = torch.softmax(logits, -1)
     return probs * (1 - p) + p / logits.size(-1)
 
 
 def encode_two_hot(
     target_values: torch.Tensor, *, bins: torch.Tensor | None = None
-):
+) -> torch.Tensor:
     """Continuous-to-two-hot encoding.
 
     Each *target* scalar is projected onto the two *nearest* bin centers and
@@ -132,13 +136,14 @@ def encode_two_hot(
     return two_hot
 
 
-def expect_symlog(logits: torch.Tensor):
+def expect_symlog(logits: torch.Tensor) -> torch.Tensor:
     probs = unimix(logits)
     bins = _get_reward_bins(logits.device)
+
     return (probs * bins).sum(-1)
 
 
-def expect_raw(logits: torch.Tensor):
+def expect_raw(logits: torch.Tensor) -> torch.Tensor:
     return symexp(expect_symlog(logits))
 
 
@@ -150,7 +155,9 @@ def expect_raw(logits: torch.Tensor):
 import torch.nn.functional as F  # placed after torch import
 
 
-def split_cross_entropy(logits: torch.Tensor, target: torch.Tensor):
+def split_cross_entropy(
+    logits: torch.Tensor, target: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
     flat_logits = logits.view(-1, VOCAB_SIZE)
     flat_target = target.reshape(-1)
 
@@ -176,7 +183,7 @@ def split_cross_entropy(logits: torch.Tensor, target: torch.Tensor):
 
 def fisher_diagonal(
     model: torch.nn.Module, batch: torch.Tensor, chunk: int = 64
-):
+) -> list[torch.Tensor]:
     """GPU-friendly approximation of the Fisher information *diagonal*."""
 
     device = next(model.parameters()).device
