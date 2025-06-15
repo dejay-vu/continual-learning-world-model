@@ -10,7 +10,7 @@ model:
 
   default: 5m
 
-training:
+train:
   epochs: 20
   context_length: 64
   imagination_horizon: 15
@@ -20,7 +20,7 @@ training:
   online_steps: 4096
   # New configurable hyper-parameters --------------------------------
   # Mini-batch size used during gradient updates.
-  batch_size: 256
+  batch_size: 64
 
   # Capacity of the *task-local* replay buffer created for each Atari
   # game.  The same value is also used for the asynchronous pre-fill

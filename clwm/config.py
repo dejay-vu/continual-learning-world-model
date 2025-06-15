@@ -113,7 +113,7 @@ class Config(_ConfigView):
             "--categories",
             type=str,
             nargs="+",
-            default=[],
+            required=True,
             help="List of *category* names defined in atari.yaml to train on.",
         )
 
@@ -127,16 +127,16 @@ class Config(_ConfigView):
         parser.add_argument(
             "--seed",
             type=int,
-            default=1,
+            default=0,
             help="Global RNG seed (torch / numpy / python).",
         )
 
         parser.add_argument(
             "--size",
             type=str,
-            default=None,
+            default="5m",
             help=(
-                "Model size preset to use – one of the keys defined under "
+                "Model size preset to use - one of the keys defined under "
                 "model.size in the YAML configuration (e.g. 1m, 5m, 20m)."
             ),
         )
@@ -201,5 +201,5 @@ class Config(_ConfigView):
         with open(path, "r", encoding="utf-8") as fh:
             cfg: dict[str, Any] = yaml.safe_load(fh)
 
-        cfg.setdefault("training", {})
+        cfg.setdefault("train", {})
         return cfg
