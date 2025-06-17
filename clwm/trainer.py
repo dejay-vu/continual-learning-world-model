@@ -5,6 +5,7 @@ from typing import Any, List
 
 import numpy as np
 import torch
+import wandb
 import yaml
 from torch.optim import Adam
 from tqdm import tqdm
@@ -48,6 +49,22 @@ class Trainer:
         # Reproducibility ---------------------------------------------
         set_global_seed(self.cli_args.get("seed", 0))
 
+        # ------------------------------------------------------------------
+        # Weights & Biases ---------------------------------------------------
+        # ------------------------------------------------------------------
+
+        # Initialise W&B **once per Trainer instance** so the run spans the
+        # full continual-learning schedule (potentially multiple tasks).
+        self.wandb_run = wandb.init(
+            project="dreamformer",
+            entity="dejayvu-university-of-oxford",
+            config=cfg,
+        )
+
+        # Global step counter that is shared across all tasks so that W&B
+        # charts have a single, monotonically increasing x-axis.
+        self._global_step: int = 0
+
         # Instantiate networks ----------------------------------------
         self.wm, self.actor, self.critic = self._build_networks()
 
@@ -84,10 +101,33 @@ class Trainer:
             # Periodic evaluation -----------------------------------
             if eval_interval is not None and len(losses) % eval_interval == 0:
                 for evaluation_game in evaluation_games:
-                    self.evaluate(
+                    eval_metrics = self.evaluate(
                         evaluation_game,
                         context_length=self.train_cfg["context_length"],
                     )
+
+                    # W&B -------------------------------------------------------------------
+                    if wandb.run is not None and eval_metrics is not None:
+                        # Protect against potential None returns
+                        wandb.log(
+                            {
+                                "eval/cross_entropy": eval_metrics.get(
+                                    "cross_entropy", float("nan")
+                                ),
+                                "eval/mean_score": eval_metrics.get(
+                                    "mean_score", float("nan")
+                                ),
+                                "eval/mean_ep_len": eval_metrics.get(
+                                    "mean_ep_len", float("nan")
+                                ),
+                                "eval/task": evaluation_game,
+                            },
+                            step=self._global_step,
+                        )
+
+        # Finish W&B run when training loop exits
+        if wandb.run is not None:
+            wandb.finish()
 
         return losses
 
@@ -478,6 +518,28 @@ class Trainer:
                 loss_reward=f"{loss_reward.item():.4f}",
                 ewc=f"{lam*ewc_penalty:.4f}",
             )
+
+            # -------------------------------------------------------------
+            # W&B logging --------------------------------------------------
+            # -------------------------------------------------------------
+
+            if wandb.run is not None:
+                self._global_step += 1
+                wandb.log(
+                    {
+                        "train/total_loss": loss.item(),
+                        "train/cross_entropy": ce.item(),
+                        "train/ce_image": ce_img.item(),
+                        "train/ce_action": ce_act.item(),
+                        "train/return_scale": return_scale.item(),
+                        "train/actor_loss": actor_loss.item(),
+                        "train/critic_loss": critic_loss.item(),
+                        "train/loss_reward": loss_reward.item(),
+                        "train/ewc_penalty": lam * ewc_penalty,
+                        "task": game,
+                    },
+                    step=self._global_step,
+                )
 
             pbar.update(1)
 

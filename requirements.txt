@@ -7,3 +7,4 @@ stable_baselines3==2.6.0
 torch==2.6.0
 tqdm==4.67.1
 vector_quantize_pytorch==1.22.16
+wandb==0.20.1
