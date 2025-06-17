@@ -95,7 +95,7 @@ class FlashAttentionBlock(nn.Module):
         # because it unconditionally enters a CUDA context. We therefore
         # restrict its usage to CUDA tensors.
         qkv_rot = self.rope(qkv, None, seqlen_offset=0, num_heads_q=self.heads)
-        qkv_rot = qkv_rot.to(torch.float16)
+        qkv_rot = qkv_rot.to(torch.bfloat16)
 
         # FlashAttention kernel (causal)
         y = flash_attn_qkvpacked_func(

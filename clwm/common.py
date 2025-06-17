@@ -55,6 +55,10 @@ def symexp(x: torch.Tensor) -> torch.Tensor:
     return torch.sign(x) * (torch.exp(torch.abs(x)) - 1)
 
 
+def np_symexp(x: np.ndarray) -> np.ndarray:
+    return np.sign(x) * (np.exp(np.abs(x)) - 1)
+
+
 # -------------------------------------------------------------------------
 # Reward/value two-hot encoding helpers -----------------------------------
 # -------------------------------------------------------------------------

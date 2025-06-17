@@ -73,7 +73,7 @@ def frames_to_indices(
         # Move the *pixel* data to the *working* device (might differ from
         # final requested output device).
         x = torch.from_numpy(batch).to(device, non_blocking=True)
-        x = x.to(dtype=torch.float16)
+        x = x.to(dtype=torch.bfloat16)
         x = x.permute(0, 3, 1, 2) / 255.0
         x = F.interpolate(x, (RES, RES), mode="bilinear", align_corners=False)
 

@@ -15,6 +15,7 @@ from .common import (
     encode_two_hot,
     expect_symlog,
     fisher_diagonal,
+    np_symexp,
     set_global_seed,
     split_cross_entropy,
     symexp,
@@ -51,8 +52,11 @@ class Trainer:
         self.wm, self.actor, self.critic = self._build_networks()
 
         # Book-keeping needed for EWC ----------------------------------
-        self._running_weights: list[torch.Tensor] = []
-        self._running_fisher: list[torch.Tensor] = []
+        # Lazily populated *after* the very first task so that the first
+        # optimisation run is unaffected and we avoid the empty-list edge
+        # cases when computing the penalty.
+        self._running_weights: list[torch.Tensor] | None = None
+        self._running_fisher: list[torch.Tensor] | None = None
 
     # ------------------------------------------------------------------
     # Public API -------------------------------------------------------
@@ -61,14 +65,12 @@ class Trainer:
     def train(
         self,
         tasks: Iterable[str] | None = None,
-        *,
         evaluation_games: Iterable[str] | None = None,
         eval_interval: int | None = 1,
     ) -> List[float]:
         """Train on *tasks* or derive them from *cli* flags."""
 
-        if tasks is None:
-            tasks, evaluation_games = self._derive_tasks()
+        tasks, evaluation_games = self._derive_tasks()
 
         losses: list[float] = []
 
@@ -81,7 +83,11 @@ class Trainer:
 
             # Periodic evaluation -----------------------------------
             if eval_interval is not None and len(losses) % eval_interval == 0:
-                self.evaluate_policy(evaluation_games or tasks)
+                for evaluation_game in evaluation_games:
+                    self.evaluate(
+                        evaluation_game,
+                        context_length=self.train_cfg["context_length"],
+                    )
 
         return losses
 
@@ -137,82 +143,6 @@ class Trainer:
 
         return train_tasks, [eval_task]
 
-    # ------------------------------------------------------------------
-    # Evaluation helpers ----------------------------------------------
-    # ------------------------------------------------------------------
-
-    def evaluate_policy(self, games: Iterable[str]):
-        """Run *zero-shot* evaluation on *games*."""
-
-        seqs = self.build_evaluation_sequences(games)
-        return self.evaluate_on_sequences(seqs)
-
-    def build_evaluation_sequences(self, games: Iterable[str]):
-        """Generate rollouts using the *current* policy network."""
-
-        cfg = self.train_cfg
-        context_length = cfg["context_length"]
-        num_envs = cfg["num_envs"]
-
-        seqs: list[torch.Tensor] = []
-
-        for game in games:
-            envs = make_atari_vectorized_envs(
-                game,
-                num_envs=num_envs,
-            )
-
-            obs, _ = envs.reset()
-            done = np.zeros(num_envs, dtype=bool)
-
-            # Collect rollout ---------------------------------------
-            while not done.all():
-                # Encode the VQ-VAE indices for the *current* frames.
-                img_tokens = frames_to_indices(obs, vqvae, device=TORCH_DEVICE)
-
-                # Build (T, L) token sequence: image + padding (actions)
-                seq = torch.full(
-                    (num_envs, context_length),
-                    ACTION_ID_START,  # dummy action tokens
-                    dtype=torch.long,
-                    device=TORCH_DEVICE,
-                )
-                seq[:, : img_tokens.size(1)] = img_tokens  # type: ignore[misc]
-
-                with torch.no_grad():
-                    logits = self.actor(seq)[:, -1]
-                    act = torch.argmax(logits, -1) - ACTION_ID_START
-
-                obs, _, new_done, _, _ = envs.step(act.cpu().numpy())
-                done |= new_done
-                seqs.append(seq.cpu())
-
-        if len(seqs) == 0:
-            return torch.empty(0, context_length, dtype=torch.long)
-        return torch.cat(seqs)
-
-    def evaluate_on_sequences(self, seqs: torch.Tensor):
-        """Return CE - (extrinsic) reward tuple for *seqs*."""
-
-        if seqs.numel() == 0:
-            return 0.0, 0.0
-
-        ce_img, ce_act = split_cross_entropy(
-            self.wm(seqs[:, :-1]), seqs[:, 1:]
-        )
-        ce = float((ce_img + ce_act).item())
-
-        # Predict cumulative return using critic network --------------
-        with torch.no_grad():
-            ret_symlog = self.critic(seqs).mean()
-            ret = float(symexp(ret_symlog).cpu())
-
-        return ce, ret
-
-    # ------------------------------------------------------------------
-    # Internal training helpers ---------------------------------------
-    # ------------------------------------------------------------------
-
     def _train_single_task(self, game: str, replay: Replay) -> float:
         """Run optimisation for *one* Atari game and return the final CE."""
 
@@ -226,17 +156,17 @@ class Trainer:
             replay=replay,
             epochs=cfg["epochs"],
             context_length=cfg["context_length"],
-            imagination_horizon=cfg.get("imagination_horizon", 15),
-            gamma=cfg.get("gamma", 0.99),
-            lam_return=cfg.get("lam_return", 0.95),
-            lam=cfg.get("lam", 0.1),
+            imagination_horizon=cfg["imagination_horizon"],
+            gamma=cfg["gamma"],
+            lam_return=cfg["lam_return"],
+            lam=cfg["lam"],
             running_weights=self._running_weights,
             running_fisher=self._running_fisher,
-            online_steps=cfg.get("online_steps", 256),
-            num_envs=cfg.get("collector_envs", 16),
-            min_prefill=cfg.get("min_prefill", 128),
-            batch_size=cfg.get("batch_size", 256),
-            sample_ratio=cfg.get("sample_ratio", 0.2),
+            online_steps=cfg["online_steps"],
+            num_envs=cfg["num_envs"],
+            min_prefill=cfg["min_prefill"],
+            batch_size=cfg["batch_size"],
+            sample_ratio=cfg["sample_ratio"],
         )
 
         # Update EWC statistics after each game ------------------------
@@ -384,7 +314,7 @@ class Trainer:
             target_tokens = batch[:, 1:].reshape(batch_size_now, -1)
 
             # ----- forward pass under mixed precision -------------------
-            with torch.autocast(device_type="cuda", dtype=torch.float16):
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 logits, kl, hidden_states = wm(
                     input_tokens, return_ent=True, return_reward=True
                 )
@@ -536,6 +466,7 @@ class Trainer:
                 loss_reward=f"{loss_reward.item():.4f}",
                 ewc=f"{lam*ewc_penalty:.4f}",
             )
+
             pbar.update(1)
 
             # -------------------------------------------------------------
@@ -615,3 +546,128 @@ class Trainer:
         actor = ActorNetwork(dim).to(TORCH_DEVICE)
         critic = CriticNetwork(dim).to(TORCH_DEVICE)
         return wm, actor, critic
+
+    @torch.inference_mode()
+    def evaluate(
+        self,
+        game: str,
+        context_length: int = 32,
+        n_seq: int = 128,
+        episodes: int = 128,
+        num_envs: int = 128,
+    ):
+        """
+        1. Builds `n_seq` context sequences of length `context_length`
+        and returns the blended cross-entropy  (0.4 ⋅ CE_img + 0.6 ⋅ CE_act).
+
+        2. Rolls out the policy for `episodes` episodes and
+        returns the mean (sym-exp) score and mean episode length.
+
+        All work is done in a single environment batch to avoid
+        spinning up two separate sets of vectorised envs.
+        """
+
+        def _rollout_envs(envs, make_seq=True, make_score=True):
+            obs, _ = envs.reset(seed=123)
+            seqs, eps = [], [[] for _ in range(num_envs)]
+
+            # running episode stats
+            ep_scores = np.zeros(num_envs, np.float32)
+            ep_lengths = np.zeros(num_envs, np.int32)
+            finished = []
+
+            while (make_seq and len(seqs) < n_seq) or (
+                make_score and len(finished) < episodes
+            ):
+                ids_batch = frames_to_indices(obs, vqvae)
+                z_batch = self.wm.tok(ids_batch.clone().detach()).mean(1)
+                actions = (
+                    torch.distributions.Categorical(self.actor(z_batch))
+                    .sample()
+                    .cpu()
+                    .numpy()
+                )
+
+                # sequence collection ------------------------------------------------
+                if make_seq:
+                    for e in range(num_envs):
+                        eps[e].append((ids_batch[e], int(actions[e])))
+                        if (
+                            len(eps[e]) >= context_length
+                        ):  # enough frames ⇒ take last context_length
+                            seq = torch.stack(
+                                [
+                                    torch.tensor(
+                                        np.append(
+                                            t.cpu().numpy(),
+                                            ACTION_ID_START + a_,
+                                        )
+                                    )
+                                    for t, a_ in eps[e][-context_length:]
+                                ]
+                            )
+                            seqs.append(seq)
+                            if len(seqs) >= n_seq:
+                                make_seq = False  # stop collecting sequences
+
+                # step envs ---------------------------------------------------------
+                obs, r, term, trunc, _ = envs.step(actions)
+
+                # score bookkeeping -------------------------------------------------
+                if make_score:
+                    ep_scores += np_symexp(r)
+                    ep_lengths += 1
+                    done = np.logical_or(term, trunc)
+                    if done.any():
+                        for e, d in enumerate(done):
+                            if d:
+                                finished.append(
+                                    (
+                                        float(ep_scores[e]),
+                                        int(ep_lengths[e]),
+                                    )
+                                )
+                                ep_scores[e] = 0.0
+                                ep_lengths[e] = 0
+                                eps[
+                                    e
+                                ].clear()  # fresh episode → wipe seq cache
+
+            return seqs, finished[:episodes]
+
+        try:
+            self.wm.eval()  # ensure model is in evaluation mode
+            self.actor.eval()
+            self.critic.eval()  # ensure model is in evaluation mode
+
+            # create env batch *once*, do both tasks
+            envs = make_atari_vectorized_envs(game, num_envs=num_envs)
+
+            seqs, finished = _rollout_envs(envs)
+            envs.close()
+
+            # ---------- sequence evaluation ------------------------------------------
+            batch = torch.stack(seqs).to(
+                TORCH_DEVICE
+            )  # (n_seq, context_length, *)
+            logits = self.wm(batch[:, :-1].reshape(len(seqs), -1))
+            ce_img, ce_act = split_cross_entropy(
+                logits, batch[:, 1:].reshape(len(seqs), -1)
+            )
+
+            blended_ce = 0.4 * ce_img + 0.6 * ce_act
+            mean_score, mean_len = map(np.mean, zip(*finished))
+            print(
+                f"Evaluating on {game}: eval_img_ce={ce_img.item():.4f} | eval_act_ce={ce_act.item():.4f} | score {mean_score:.1f} | frames/ep {mean_len:.0f}"
+            )
+
+        finally:
+            self.wm.train()  # ensure model is in training mode
+            self.actor.train()
+            self.critic.train()
+
+        return {
+            "cross_entropy": float(blended_ce),
+            "mean_score": float(mean_score),
+            "mean_ep_len": float(mean_len),
+        }

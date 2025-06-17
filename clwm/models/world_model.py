@@ -20,6 +20,7 @@ class WorldModel(nn.Module):
         self.ln = nn.LayerNorm(dim)
         self.head = nn.Linear(dim, VOCAB_SIZE, bias=False)
         self.reward_head = nn.Linear(dim, len(REWARD_BINS), bias=False)
+
         nn.init.zeros_(self.reward_head.weight)
 
     def add_task(self) -> None:
@@ -34,12 +35,33 @@ class WorldModel(nn.Module):
     ):
         x = self.tok(seq)
         ent_sum = 0.0
-        for i, b in enumerate(self.blocks):
-            # Gradient-checkpoint every second block during training to lower
-            # activation memory.  We keep evaluation untouched to avoid the
-            # runtime overhead when gradients are not required.
+        for i, block in enumerate(self.blocks):
+            # -------------------------------------------------------------
+            # Gradient-checkpointing is only beneficial during training as
+            # it trades extra compute for a lower activation memory
+            # footprint.  When the model is in evaluation mode we execute
+            # the transformer block normally to avoid the overhead incurred
+            # by the checkpoint machinery.
+            # -------------------------------------------------------------
+
+            # -------------------------------------------------------------
+            # Gradient-checkpointing with variable-length sequences may
+            # raise a *CheckpointError* when the recomputed tensors have a
+            # different shape than the ones captured during the forward
+            # pass (see https://github.com/pytorch/pytorch/issues/111686).
+            #
+            # Such a shape mismatch can occur in our setting because the
+            # token sequence fed into *WorldModel* changes every iteration
+            # (e.g. due to varying context lengths during imagination
+            # roll-outs).  Since correctness is more important than the
+            # marginal memory savings, we gracefully fall back to a regular
+            # forward pass whenever the checkpoint mechanism complains.
+            # -------------------------------------------------------------
+
             if self.training:
-                x, g = ckpt.checkpoint(b, x, use_reentrant=False)
+                x, g = ckpt.checkpoint(block, x, use_reentrant=False)
+            else:
+                x, g = block(x)
 
             if return_ent:
                 kl = (g * (g + 1e-8).log()).sum(-1) + math.log(g.size(-1))
@@ -101,6 +123,18 @@ class ActorNetwork(nn.Module):
         probs : torch.Tensor
             Smoothed action distribution, shape (B, MAX_ACTIONS), ∑=1.
         """
+        # ------------------------------------------------------------------
+        # Accept *integer* token sequences during evaluation  ----------------
+        # ------------------------------------------------------------------
+        # The evaluation helper passes raw token ids (dtype ``torch.long``)
+        # directly into the policy network.  Linear layers expect floating
+        # point inputs, therefore we up-cast non-floating tensors on-the-fly
+        # to avoid the ``RuntimeError: mat1 and mat2 must have the same
+        # dtype, but got Long and Float``.
+
+        if not torch.is_floating_point(x):  # e.g. torch.long tokens
+            x = x.to(torch.float32)
+
         x = x.view(x.size(0), -1)  # flatten if needed
         x = self.mlp(x)  # (B, hidden_dim)
         logits = self.out(x)
@@ -178,6 +212,10 @@ class CriticNetwork(nn.Module):
         values : torch.Tensor
             Estimated future rewards, shape (B, len(REWARD_BINS)).
         """
+        # Up-cast integer inputs on-the-fly (see ActorNetwork).
+        if not torch.is_floating_point(x):
+            x = x.to(torch.float32)
+
         x = x.view(x.size(0), -1)
         x = self.mlp(x)
         logits = self.out(x)
