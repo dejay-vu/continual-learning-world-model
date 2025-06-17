@@ -281,7 +281,7 @@ class Trainer:
         batch_gpu = copy_mgr.to_device(batch_cpu, TORCH_DEVICE)
 
         reward_env_tensor = torch.tensor(
-            rewards, dtype=torch.float16, device=TORCH_DEVICE
+            rewards, dtype=torch.bfloat16, device=TORCH_DEVICE
         )
 
         pbar_desc = f"Learning {game}" if game is not None else "Training"
@@ -333,7 +333,15 @@ class Trainer:
             reward_logits = wm.reward_head(
                 hidden_states[:, -1].to(reward_head_dtype)
             )  # (B, |BINS|)
-            reward_target = encode_two_hot(reward_env)
+            # The reward bins are defined *in symlog space* (see
+            # ``common.REWARD_BINS``).  To keep the target distribution aligned
+            # with what the *reward_head* predicts we therefore need to apply
+            # the same non-linear transformation to the raw environment reward
+            # before constructing the two-hot encoding.
+
+            from .common import symlog  # local import to avoid circular deps
+
+            reward_target = encode_two_hot(symlog(reward_env))
 
             log_probs = torch.log_softmax(reward_logits, dim=-1)
             loss_reward = -(reward_target * log_probs).sum(-1).mean()
@@ -409,10 +417,14 @@ class Trainer:
                 - beta * entropies
             ).mean()
 
-            val_logits = critic(latents[-1].detach())
-            val_target = encode_two_hot(
-                returns[:, 0]
-            )  # bootstrap λ-return per batch
+            # The critic should estimate the *λ-return* **from the current
+            # latent state** (``latents[0]``).  Using the *final* imagined
+            # latent (``latents[-1]``) – which already incorporates the whole
+            # rollout – biases the value network and makes the learning signal
+            # unnecessarily noisy.
+
+            val_logits = critic(latents[0].detach())
+            val_target = encode_two_hot(returns[:, 0])  # λ-return at t=0
             critic_loss = (
                 -(val_target * torch.log_softmax(val_logits, -1))
                 .sum(-1)
