@@ -373,15 +373,18 @@ class Trainer:
             reward_logits = wm.reward_head(
                 hidden_states[:, -1].to(reward_head_dtype)
             )  # (B, |BINS|)
-            # The reward bins are defined *in symlog space* (see
-            # ``common.REWARD_BINS``).  To keep the target distribution aligned
-            # with what the *reward_head* predicts we therefore need to apply
-            # the same non-linear transformation to the raw environment reward
-            # before constructing the two-hot encoding.
+            # The replay, environment wrapper and all downstream computations
+            # already operate **in symlog space** (see
+            # ``clwm.env.atari_envs.wrap_reward_symlog`` and
+            # ``common.REWARD_BINS``).  The stored *reward_env* tensor
+            # therefore **is** the symlog-scaled reward.  Applying *symlog*
+            # once more would incorrectly compress the magnitude
+            # ("symlog ∘ symlog") and break the coupling between the predicted
+            # distribution and the target encoding.  The extra non-linear
+            # call has been removed so that both head and target live in the
+            # same, single-application symlog space.
 
-            from .common import symlog  # local import to avoid circular deps
-
-            reward_target = encode_two_hot(symlog(reward_env))
+            reward_target = encode_two_hot(reward_env)
 
             log_probs = torch.log_softmax(reward_logits, dim=-1)
             loss_reward = -(reward_target * log_probs).sum(-1).mean()
@@ -551,7 +554,7 @@ class Trainer:
 
             batch_gpu = next_batch_gpu  # promote pre-fetched batch
             reward_env_tensor = torch.tensor(
-                next_rewards, dtype=torch.float16, device=TORCH_DEVICE
+                next_rewards, dtype=torch.bfloat16, device=TORCH_DEVICE
             )
 
         pbar.close()
