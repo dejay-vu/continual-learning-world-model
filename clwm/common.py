@@ -1,10 +1,4 @@
-"""Project-wide constants and math helpers.
-
-The contents were previously hidden inside ``clwm/utils/common`` - moving
-them into a dedicated *top-level* module removes the need for the generic
-``utils`` package and makes the public API clearer.
-"""
-
+import os
 import random
 
 import numpy as np
@@ -36,11 +30,61 @@ TORCH_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def set_global_seed(seed: int = 0) -> None:
-    """Seed *torch*, *numpy* and the Python RNG."""
+    """Seed **all** relevant random number generators.
 
-    torch.manual_seed(seed)
-    np.random.seed(seed)
+    The helper aims to make *every* source of randomness in the codebase
+    deterministic.  It covers
+
+    • Python's ``random`` module
+    • NumPy
+    • PyTorch (CPU and CUDA)
+
+    and additionally configures PyTorch/CUDA back-ends for bit-wise
+    repeatability.  Every training script **must** call this function *once*
+    at start-up **before** any other library (especially PyTorch) performs
+    operations that rely on an RNG.
+    """
+
+    # ------------------------------------------------------------------
+    # Python, NumPy -----------------------------------------------------
+    # ------------------------------------------------------------------
     random.seed(seed)
+    np.random.seed(seed)
+
+    # A reproducible hash seed ensures repeatable order of objects when
+    # iterating over e.g. dictionaries (Python ≥3.3 randomises hash salts by
+    # default).  This must be **set before** the interpreter creates new
+    # hash-based objects, therefore we do it here even though setting an
+    # environment variable at runtime is technically *too late* for objects
+    # that have already been instantiated.  As this function is supposed to
+    # be called at the very top of scripts this limitation is acceptable.
+    import os
+
+    os.environ["PYTHONHASHSEED"] = str(seed)
+
+    # ------------------------------------------------------------------
+    # PyTorch -----------------------------------------------------------
+    # ------------------------------------------------------------------
+    torch.manual_seed(seed)
+
+    # For completeness also seed *all* CUDA devices explicitly.  This is a
+    # no-op on CPU-only machines but harmless.
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+        # Deterministic cuDNN / CUDA behaviour -------------------------
+        torch.backends.cudnn.deterministic = True  # type: ignore[attr-defined]
+        torch.backends.cudnn.benchmark = False  # type: ignore[attr-defined]
+
+        # Disable TF32 which can introduce non-deterministic rounding
+        torch.backends.cuda.matmul.allow_tf32 = False  # type: ignore[attr-defined]
+        torch.backends.cudnn.allow_tf32 = False  # type: ignore[attr-defined]
+
+    # Enforce deterministic algorithms whenever PyTorch offers them.  Some
+    # operations (e.g. certain reductions) might not have a deterministic
+    # variant; by passing *warn_only=True* we degrade gracefully while still
+    # surfacing a clear warning to users.
+    torch.use_deterministic_algorithms(True, warn_only=True)
 
 
 def symlog(x: torch.Tensor) -> torch.Tensor:

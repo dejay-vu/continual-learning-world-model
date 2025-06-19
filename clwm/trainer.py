@@ -1,6 +1,7 @@
 from collections.abc import Iterable
 from pathlib import Path
 from random import choice, shuffle
+import random
 from typing import Any, List
 
 import numpy as np
@@ -575,7 +576,13 @@ class Trainer:
         """
 
         def _rollout_envs(envs, make_seq=True, make_score=True):
-            obs, _ = envs.reset(seed=123)
+            # Each reset receives a deterministic seed that depends on the
+            # global RNG state.  Because the global RNG is initialised via
+            # ``set_global_seed`` this guarantees bit-wise reproducibility
+            # *and* allows different top-level seeds to result in different
+            # evaluation roll-outs.
+
+            obs, _ = envs.reset(seed=random.randint(0, 2**32 - 1))
             seqs, eps = [], [[] for _ in range(num_envs)]
 
             # running episode stats

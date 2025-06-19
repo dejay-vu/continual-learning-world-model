@@ -197,7 +197,14 @@ class Replay:
             num_envs=num_envs,
         )
 
-        obs, _ = envs.reset()
+        # Pass a deterministic, *per-call* seed to the environment manager so
+        # that the exact same trajectories are reproduced when the global
+        # seed (see ``set_global_seed``) is identical.  We draw the seed from
+        # Python's RNG which has been initialised by ``set_global_seed`` –
+        # this guarantees repeatability across runs while still yielding a
+        # unique seed for *each* call to :pyfunc:`fill`.
+
+        obs, _ = envs.reset(seed=random.randint(0, 2**32 - 1))
 
         # ------------------------------------------------------------------
         #  The previous implementation accumulated *all* frames, actions …
