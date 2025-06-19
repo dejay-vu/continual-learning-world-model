@@ -11,7 +11,7 @@ model:
   default: 5m
 
 train:
-  epochs: 200
+  epochs: 400
   context_length: 64
   imagination_horizon: 15
   gamma: 0.99
@@ -26,7 +26,7 @@ train:
   # game.  The same value is also used for the asynchronous pre-fill
   # buffer that is populated while the previous task is still
   # training.
-  replay_size: 30000
+  replay_size: 500000
 
   # Fraction of samples that are drawn from the *cross-task* rehearsal
   # memory when creating a batch via ``Replay.sample_mixed``.

@@ -1,7 +1,7 @@
+import random
 from collections.abc import Iterable
 from pathlib import Path
 from random import choice, shuffle
-import random
 from typing import Any, List
 
 import numpy as np
@@ -193,7 +193,7 @@ class Trainer:
         )
 
         # Update EWC statistics after each game ------------------------
-        self._update_ewc(replay)
+        # self._update_ewc(replay)
 
         return float(loss)
 
@@ -370,7 +370,9 @@ class Trainer:
             )
 
             # -------------------- reward normalization --------------------
-            offset, scale = self.reward_ema(reward_env, ema_vals=self.ema_vals)
+            offset, scale = self.reward_ema(
+                reward_env.float(), ema_vals=self.ema_vals
+            )
             normalized_returns = (returns - offset) / (scale + 1e-3)
             normalized_values = (values - offset) / (scale + 1e-3)
             advantage = normalized_returns - normalized_values
@@ -408,7 +410,8 @@ class Trainer:
                         F_ = F_diag.to(p.device, dtype=p.dtype)
                         ewc_penalty += (F_ * (p - theta_star_).pow(2)).sum()
 
-            wm_loss = ce_wm + loss_reward + lam * ewc_penalty
+            # wm_loss = ce_wm + loss_reward + lam * ewc_penalty
+            wm_loss = ce_wm + loss_reward
 
             loss = wm_loss + actor_loss + critic_loss + loss_reward
 
@@ -655,7 +658,9 @@ class Trainer:
             self.critic.eval()  # ensure model is in evaluation mode
 
             # create env batch *once*, do both tasks
-            envs = make_atari_vectorized_envs(game, num_envs=num_envs)
+            envs = make_atari_vectorized_envs(
+                game, num_envs=num_envs, sticky=False
+            )
 
             seqs, finished = _rollout_envs(envs)
             envs.close()

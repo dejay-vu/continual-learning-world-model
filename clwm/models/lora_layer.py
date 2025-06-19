@@ -12,8 +12,6 @@ class LoRA(nn.Module):
         self.A = nn.Parameter(torch.zeros(r, dim))
         self.B = nn.Parameter(torch.empty(dim, r))
 
-        nn.init.kaiming_uniform_(self.B, a=math.sqrt(5))
-
         self.scale = alpha / r
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

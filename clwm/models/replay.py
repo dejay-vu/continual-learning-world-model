@@ -36,7 +36,6 @@ class Replay:
     # Shared rehearsal memory (class attribute, persists across tasks)
     # ------------------------------------------------------------------
 
-    _GLOBAL_CAPACITY = 100_000  # hard cap on the cross-task memory size
     _global_buffer: deque[Tuple[torch.Tensor, float]] | None = None
 
     def __init__(self, cap: int) -> None:
@@ -47,7 +46,7 @@ class Replay:
 
         # Lazily initialise the **shared** rehearsal memory once.
         if Replay._global_buffer is None:
-            Replay._global_buffer = deque(maxlen=Replay._GLOBAL_CAPACITY)
+            Replay._global_buffer = deque(maxlen=15_000_000)
 
         # Separate CUDA stream for auxiliary GPU work (e.g. VQ-VAE encoding).
         # Using a dedicated stream allows replay collection – which runs in a

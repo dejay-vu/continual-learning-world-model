@@ -1,8 +1,8 @@
-import os
 import random
 
 import numpy as np
 import torch
+import torch.nn.functional as F  # placed after torch import
 
 # -------------------------------------------------------------------------
 # VQ-VAE / tokeniser constants -------------------------------------------
@@ -79,12 +79,6 @@ def set_global_seed(seed: int = 0) -> None:
         # Disable TF32 which can introduce non-deterministic rounding
         torch.backends.cuda.matmul.allow_tf32 = False  # type: ignore[attr-defined]
         torch.backends.cudnn.allow_tf32 = False  # type: ignore[attr-defined]
-
-    # Enforce deterministic algorithms whenever PyTorch offers them.  Some
-    # operations (e.g. certain reductions) might not have a deterministic
-    # variant; by passing *warn_only=True* we degrade gracefully while still
-    # surfacing a clear warning to users.
-    torch.use_deterministic_algorithms(True, warn_only=True)
 
 
 def symlog(x: torch.Tensor) -> torch.Tensor:
@@ -198,9 +192,6 @@ def expect_raw(logits: torch.Tensor) -> torch.Tensor:
 # -------------------------------------------------------------------------
 # Training helpers --------------------------------------------------------
 # -------------------------------------------------------------------------
-
-
-import torch.nn.functional as F  # placed after torch import
 
 
 def split_cross_entropy(
