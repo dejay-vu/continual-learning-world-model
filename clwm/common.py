@@ -272,12 +272,10 @@ class RewardEMA:
     def __call__(
         self, x: torch.Tensor, ema_vals: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        flat = torch.flatten(x.detach())
-        q05, q95 = torch.quantile(flat.float(), self.range)
-        ema_vals[:] = (
-            self.alpha * torch.tensor([q05, q95], device=flat.device)
-            + (1 - self.alpha) * ema_vals
-        )
+        flat_x = torch.flatten(x.detach())
+        x_quantile = torch.quantile(input=flat_x, q=self.range)
+        ema_vals[:] = self.alpha * x_quantile + (1 - self.alpha) * ema_vals
         scale = torch.clamp(ema_vals[1] - ema_vals[0], min=1.0)
         offset = ema_vals[0]
+
         return offset.detach(), scale.detach()

@@ -7,8 +7,7 @@ import numpy as np
 import torch
 import wandb
 import yaml
-from cv2 import normalize
-from torch.optim import Adam, AdamW
+from torch.optim import Adam
 from tqdm import tqdm
 
 from .common import (
@@ -25,7 +24,6 @@ from .common import (
 from .concurrency import AsyncExecutor, StreamManager
 from .env.atari_envs import make_atari_vectorized_envs
 from .models.replay import Replay
-from .models.vqvae import H16, W16
 from .models.vqvae_utils import frames_to_indices, vqvae
 from .models.world_model import ActorNetwork, CriticNetwork, WorldModel
 
