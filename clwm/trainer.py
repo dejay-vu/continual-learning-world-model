@@ -321,7 +321,7 @@ class Trainer:
                 )
 
             ce_img, ce_act = split_cross_entropy(logits, target_tokens)
-            wm_loss = 0.4 * ce_img + 0.6 * ce_act
+            ce_wm = 0.4 * ce_img + 0.6 * ce_act
 
             # LayerNorm in mixed-precision currently upcasts its output to
             # fp32 which causes a dtype mismatch with the fp16-cast model
@@ -409,13 +409,9 @@ class Trainer:
                         F_ = F_diag.to(p.device, dtype=p.dtype)
                         ewc_penalty += (F_ * (p - theta_star_).pow(2)).sum()
 
-            loss = (
-                wm_loss
-                + actor_loss
-                + critic_loss
-                + loss_reward
-                + lam * ewc_penalty
-            )
+            wm_loss = ce_wm + loss_reward + lam * ewc_penalty
+
+            loss = wm_loss + actor_loss + critic_loss + loss_reward
 
             self.scaler.scale(wm_loss).backward()
             self.scaler.scale(actor_loss).backward()
