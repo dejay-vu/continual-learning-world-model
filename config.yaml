@@ -11,7 +11,7 @@ model:
   default: 5m
 
 train:
-  epochs: 20
+  epochs: 200
   context_length: 64
   imagination_horizon: 15
   gamma: 0.99
@@ -33,5 +33,6 @@ train:
   sample_ratio: 0.2
 
   evaluation_interval: 1
-  num_envs: 16
+  num_envs: 128
+  min_prefill: 256
   

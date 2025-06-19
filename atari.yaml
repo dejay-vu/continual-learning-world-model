@@ -122,5 +122,10 @@ categories:
     - Koolaid
     - LostLuggage
     - Trondead
-
-# Note: Each game appears in exactly one primary category above.
+  
+  test:
+    - Krull
+    - Krull
+    - Krull
+    - Krull
+    - Krull

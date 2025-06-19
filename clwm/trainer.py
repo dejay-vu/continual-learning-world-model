@@ -7,19 +7,20 @@ import numpy as np
 import torch
 import wandb
 import yaml
-from torch.optim import Adam
+from cv2 import normalize
+from torch.optim import Adam, AdamW
 from tqdm import tqdm
 
 from .common import (
     ACTION_ID_START,
     TORCH_DEVICE,
+    RewardEMA,
     encode_two_hot,
     expect_symlog,
     fisher_diagonal,
     np_symexp,
     set_global_seed,
     split_cross_entropy,
-    symexp,
 )
 from .concurrency import AsyncExecutor, StreamManager
 from .env.atari_envs import make_atari_vectorized_envs
@@ -32,52 +33,41 @@ from .models.world_model import ActorNetwork, CriticNetwork, WorldModel
 class Trainer:
     """High-level orchestrator for continual-learning training runs."""
 
-    # ------------------------------------------------------------------
-    # Construction -----------------------------------------------------
-    # ------------------------------------------------------------------
-
-    def __init__(self, **cfg):  # noqa: D401 – flexible signature
-        """Create a new *Trainer* from a *dict*-like config structure."""
-
-        # Store *full* config for later access (evaluation, logging, …)
+    def __init__(self, **cfg: dict[str, Any]):
+        # Unpack the configuration dictionary
         self.raw_cfg = cfg
-
         self.model_cfg: dict[str, Any] = cfg["model"]
         self.train_cfg: dict[str, Any] = cfg["train"]
         self.cli_args: dict[str, Any] = cfg["cli"]
 
-        # Reproducibility ---------------------------------------------
-        set_global_seed(self.cli_args.get("seed", 0))
+        # nets
+        self.wm, self.actor, self.critic = self._build_networks()
 
-        # ------------------------------------------------------------------
-        # Weights & Biases ---------------------------------------------------
-        # ------------------------------------------------------------------
+        # optimizers
+        self.opt_wm = Adam(self.wm.parameters(), lr=1e-4)
+        self.opt_actor = Adam(self.actor.parameters(), lr=4e-4)
+        self.opt_critic = AdamW(
+            self.critic.parameters(), lr=3e-5, weight_decay=1e-4
+        )
 
-        # Initialise W&B **once per Trainer instance** so the run spans the
-        # full continual-learning schedule (potentially multiple tasks).
+        # reward normaliser
+        self.reward_ema = RewardEMA(TORCH_DEVICE)
+        self.ema_vals = torch.tensor(
+            [0.0, 1.0], device=TORCH_DEVICE, dtype=torch.float32
+        )
+
+        self._running_weights: list[torch.Tensor] | None = None
+        self._running_fisher: list[torch.Tensor] | None = None
+
+        self._global_frame: int = 0
+
         self.wandb_run = wandb.init(
             project="dreamformer",
             entity="dejayvu-university-of-oxford",
             config=cfg,
         )
 
-        # Global step counter that is shared across all tasks so that W&B
-        # charts have a single, monotonically increasing x-axis.
-        self._global_step: int = 0
-
-        # Instantiate networks ----------------------------------------
-        self.wm, self.actor, self.critic = self._build_networks()
-
-        # Book-keeping needed for EWC ----------------------------------
-        # Lazily populated *after* the very first task so that the first
-        # optimisation run is unaffected and we avoid the empty-list edge
-        # cases when computing the penalty.
-        self._running_weights: list[torch.Tensor] | None = None
-        self._running_fisher: list[torch.Tensor] | None = None
-
-    # ------------------------------------------------------------------
-    # Public API -------------------------------------------------------
-    # ------------------------------------------------------------------
+        set_global_seed(self.cli_args.get("seed", 0))
 
     def train(
         self,
@@ -122,7 +112,7 @@ class Trainer:
                                 ),
                                 "eval/task": evaluation_game,
                             },
-                            step=self._global_step,
+                            step=self._global_frame,
                         )
 
         # Finish W&B run when training loop exits
@@ -130,10 +120,6 @@ class Trainer:
             wandb.finish()
 
         return losses
-
-    # ------------------------------------------------------------------
-    # Task derivation ---------------------------------------------------
-    # ------------------------------------------------------------------
 
     def _derive_tasks(self):
         # CLI dictionary is always present (see Config.from_cli)
@@ -190,9 +176,6 @@ class Trainer:
 
         loss = self._train_single_task_loop(
             game=game,
-            wm=self.wm,
-            actor=self.actor,
-            critic=self.critic,
             replay=replay,
             epochs=cfg["epochs"],
             context_length=cfg["context_length"],
@@ -217,9 +200,6 @@ class Trainer:
     def _train_single_task_loop(
         self,
         game: str,
-        wm: WorldModel,
-        actor: ActorNetwork,
-        critic: CriticNetwork,
         replay: Replay,
         epochs: int,
         context_length: int,
@@ -236,21 +216,6 @@ class Trainer:
         sample_ratio: float,
     ):
         """Run the training loop for *epochs* iterations."""
-
-        N_PATCH = H16 * W16  # 25 for 84×84 input images with 16-pixel patches
-
-        # Running normalisation factor for advantages
-        return_scale = torch.tensor(1.0, device=TORCH_DEVICE)
-        decay = 0.99  # EMA smoothing constant
-
-        # ------------------------------------------------------------------
-        # Optimisers & AMP --------------------------------------------------
-        # ------------------------------------------------------------------
-
-        opt_wm = Adam(wm.parameters(), 1e-4)
-        opt_act = Adam(actor.parameters(), 4e-4)
-        opt_cri = Adam(critic.parameters(), 4e-4)
-
         scaler = torch.GradScaler()
 
         loss_history: list[float] = []
@@ -267,8 +232,8 @@ class Trainer:
                 try:
                     replay.fill(
                         game,
-                        wm,  # updated weights are visible across threads
-                        actor,
+                        self.wm,
+                        self.actor,
                         steps=online_steps,
                         context_length=context_length,
                         num_envs=num_envs,
@@ -284,13 +249,11 @@ class Trainer:
 
         copy_mgr = StreamManager()
 
-        BATCH_SIZE = batch_size
-
         def _sample_batch():
             """Sample and *pin* a batch on the host."""
 
             samples = replay.sample_mixed(
-                BATCH_SIZE, ratio=sample_ratio, min_global=13
+                batch_size, ratio=sample_ratio, min_global=13
             )
 
             if len(samples) == 0:
@@ -305,8 +268,8 @@ class Trainer:
         if replay.get_buffer_size() < min_prefill:
             replay.fill(
                 game,
-                wm,
-                actor,
+                self.wm,
+                self.actor,
                 steps=min_prefill,
                 context_length=context_length,
                 num_envs=num_envs,
@@ -355,7 +318,7 @@ class Trainer:
 
             # ----- forward pass under mixed precision -------------------
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                logits, kl, hidden_states = wm(
+                logits, kl, hidden_states = self.wm(
                     input_tokens, return_ent=True, return_reward=True
                 )
 
@@ -369,8 +332,8 @@ class Trainer:
             # weights avoids the runtime error "mat1 and mat2 must have the same
             # dtype" while keeping the rest of the computation untouched.
 
-            reward_head_dtype = wm.reward_head.weight.dtype
-            reward_logits = wm.reward_head(
+            reward_head_dtype = self.wm.reward_head.weight.dtype
+            reward_logits = self.wm.reward_head(
                 hidden_states[:, -1].to(reward_head_dtype)
             )  # (B, |BINS|)
             # The replay, environment wrapper and all downstream computations
@@ -389,76 +352,38 @@ class Trainer:
             log_probs = torch.log_softmax(reward_logits, dim=-1)
             loss_reward = -(reward_target * log_probs).sum(-1).mean()
 
-            # imagination rollout
-            last_tokens = input_tokens[:, -N_PATCH:]
-            initial_latent = wm.tok(last_tokens).mean(1)
-            latents, log_probabilities, entropies, imagined_rewards, values = (
-                [initial_latent],
-                [],
-                [],
-                [],
-                [],
+            (
+                latents_tensor,
+                imagined_rewards,
+                values,
+                returns,
+                _actions,
+                log_probabilities,
+                entropies,
+            ) = self.wm.imagine(
+                input_tokens,
+                actor=self.actor,
+                critic=self.critic,
+                context_length=context_length,
+                horizon=imagination_horizon,
+                gamma=gamma,
+                lam_return=lam_return,
+                return_policy_stats=True,
             )
 
-            for _ in range(imagination_horizon):
-                action_probabilities = actor(latents[-1].detach())
-                action_distribution = torch.distributions.Categorical(
-                    action_probabilities
-                )
-                actions = action_distribution.sample()
-                log_probabilities.append(action_distribution.log_prob(actions))
-                entropies.append(action_distribution.entropy())
+            # -------------------- reward normalization --------------------
+            offset, scale = self.reward_ema(reward_env, ema_vals=self.ema_vals)
+            normalized_returns = (returns - offset) / (scale + 1e-3)
+            normalized_values = (values - offset) / (scale + 1e-3)
+            advantage = normalized_returns - normalized_values
 
-                # --- push action token, predict next latent -----------------
-                roll = torch.cat(
-                    [
-                        input_tokens[:, -context_length * (N_PATCH + 1) :],
-                        (ACTION_ID_START + actions).unsqueeze(1),
-                    ],
-                    1,
-                )
-                ntok = wm(roll)[:, -1].argmax(-1, keepdim=True)
-                next_latent = wm.tok(ntok).squeeze(1)  # (B, dim)
-                latents.append(next_latent)
-
-                prob_reward = expect_symlog(wm.reward_head(next_latent))
-                imagined_rewards.append(prob_reward)
-
-                prob_value = expect_symlog(critic(next_latent.detach()))
-                values.append(prob_value.detach())
-
-            batch_size_now, time_horizon = values[0].size(0), len(values)
-            values = torch.stack(values, 1)
-            imagined_rewards = torch.stack(imagined_rewards, 1)
-            log_probabilities = torch.stack(log_probabilities, 1)
-            entropies = torch.stack(entropies, 1)
-
-            value_bootstrap = expect_symlog(critic(latents[-1].detach()))
-            running_return = value_bootstrap  # bootstrap
-            returns = torch.zeros_like(imagined_rewards)
-
-            for t in reversed(range(time_horizon)):
-                running_return = imagined_rewards[:, t] + gamma * (
-                    (1 - lam_return) * values[:, t]
-                    + lam_return * running_return
-                )
-                returns[:, t] = running_return
-
-            with torch.no_grad():
-                r_symlog = returns.detach()
-                S = torch.quantile(r_symlog, 0.95) - torch.quantile(
-                    r_symlog, 0.05
-                )  # a single scalar
-                return_scale.mul_(decay).add_((1 - decay) * S)
-                return_scale.clamp_(min=1.0)
-
-            advantage = returns - values
-            normalized_advantage = advantage / (return_scale + 1e-3)
+            # -------------------- losses --------------------
             beta = 3e-4
             actor_loss = (
-                -(log_probabilities * normalized_advantage.detach())
-                - beta * entropies
+                -(log_probabilities * advantage.detach()) - beta * entropies
             ).mean()
+
+            # --- Done computing actor_loss above ---
 
             # The critic should estimate the *λ-return* **from the current
             # latent state** (``latents[0]``).  Using the *final* imagined
@@ -466,7 +391,7 @@ class Trainer:
             # rollout – biases the value network and makes the learning signal
             # unnecessarily noisy.
 
-            val_logits = critic(latents[0].detach())
+            val_logits = self.critic(latents_tensor[:, 0].detach())
             val_target = encode_two_hot(returns[:, 0])  # λ-return at t=0
             critic_loss = (
                 -(val_target * torch.log_softmax(val_logits, -1))
@@ -478,7 +403,7 @@ class Trainer:
 
             if running_weights is not None:  # skip for very first task
                 for p, theta_star, F_diag in zip(
-                    wm.parameters(), running_weights, running_fisher
+                    self.wm.parameters(), running_weights, running_fisher
                 ):
                     if p.requires_grad and p.shape == theta_star.shape:
                         theta_star_ = theta_star.to(p.device, dtype=p.dtype)
@@ -489,23 +414,24 @@ class Trainer:
                 ce + actor_loss + critic_loss + loss_reward + lam * ewc_penalty
             )
 
-            opt_wm.zero_grad()
-            opt_act.zero_grad()
-            opt_cri.zero_grad()
+            self.opt_wm.zero_grad()
+            self.opt_actor.zero_grad()
+            self.opt_critic.zero_grad()
 
             scaler.scale(loss).backward()
-            # Gradient clipping requires unscaled grads
-            scaler.unscale_(opt_wm)
-            scaler.unscale_(opt_act)
-            scaler.unscale_(opt_cri)
-            torch.nn.utils.clip_grad_norm_(wm.parameters(), 5.0)
 
-            scaler.step(opt_wm)
-            scaler.step(opt_act)
-            scaler.step(opt_cri)
+            # Gradient clipping requires unscaled grads
+            scaler.unscale_(self.opt_wm)
+            scaler.unscale_(self.opt_actor)
+            scaler.unscale_(self.opt_critic)
+            torch.nn.utils.clip_grad_norm_(self.wm.parameters(), 5.0)
+
+            scaler.step(self.opt_wm)
+            scaler.step(self.opt_actor)
+            scaler.step(self.opt_critic)
             scaler.update()
 
-            for block in wm.blocks:
+            for block in self.wm.blocks:
                 block.tau.mul_(0.90).clamp_(min=0.02)
 
             loss_history.append(loss.item())
@@ -515,11 +441,11 @@ class Trainer:
                 ce=f"{ce.item():.4f}",
                 ce_img=f"{ce_img.item():.3f}",
                 ce_act=f"{ce_act.item():.3f}",
-                return_scale=f"{return_scale.item():.4f}",
+                return_scale=f"{advantage.std().item():.4f}",
                 actor_loss=f"{actor_loss.item():.4f}",
                 critic_loss=f"{critic_loss.item():.4f}",
                 loss_reward=f"{loss_reward.item():.4f}",
-                ewc=f"{lam*ewc_penalty:.4f}",
+                # ewc=f"{lam*ewc_penalty:.4f}",
             )
 
             # -------------------------------------------------------------
@@ -527,21 +453,21 @@ class Trainer:
             # -------------------------------------------------------------
 
             if wandb.run is not None:
-                self._global_step += 1
+                self._global_frame += 1
                 wandb.log(
                     {
                         "train/total_loss": loss.item(),
                         "train/cross_entropy": ce.item(),
                         "train/ce_image": ce_img.item(),
                         "train/ce_action": ce_act.item(),
-                        "train/return_scale": return_scale.item(),
+                        "train/advantage": advantage.std().item(),
                         "train/actor_loss": actor_loss.item(),
                         "train/critic_loss": critic_loss.item(),
                         "train/loss_reward": loss_reward.item(),
                         "train/ewc_penalty": lam * ewc_penalty,
                         "task": game,
                     },
-                    step=self._global_step,
+                    step=self._global_frame,
                 )
 
             pbar.update(1)
@@ -622,6 +548,7 @@ class Trainer:
         wm = WorldModel(**wm_kwargs).to(TORCH_DEVICE)
         actor = ActorNetwork(dim).to(TORCH_DEVICE)
         critic = CriticNetwork(dim).to(TORCH_DEVICE)
+
         return wm, actor, critic
 
     @torch.inference_mode()

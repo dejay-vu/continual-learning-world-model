@@ -251,3 +251,33 @@ def fisher_diagonal(
         buf / total_target_tokens for buf in fisher_diag_buffers
     ]
     return fisher_diagonal_estimate
+
+
+class RewardEMA:
+    """
+    Track the 5- and 95-percentile of the environment reward with
+    exponential smoothing and return an (offset, scale) tuple that
+    can be used to normalise λ-returns.
+
+    Calling convention:
+    >>> offset, scale = reward_ema(batch_rewards, ema_vals)
+    >>> normed = (returns - offset) / scale
+    """
+
+    def __init__(self, device: torch.device, alpha: float = 1e-2) -> None:
+        self.range = torch.tensor([0.05, 0.95], device=device)
+        self.alpha = alpha
+
+    @torch.no_grad()
+    def __call__(
+        self, x: torch.Tensor, ema_vals: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        flat = torch.flatten(x.detach())
+        q05, q95 = torch.quantile(flat.float(), self.range)
+        ema_vals[:] = (
+            self.alpha * torch.tensor([q05, q95], device=flat.device)
+            + (1 - self.alpha) * ema_vals
+        )
+        scale = torch.clamp(ema_vals[1] - ema_vals[0], min=1.0)
+        offset = ema_vals[0]
+        return offset.detach(), scale.detach()

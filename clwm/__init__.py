@@ -8,6 +8,7 @@ from .common import (
     TORCH_DEVICE,
     VOCAB_SIZE,
     VQVAE_CHECKPOINT,
+    RewardEMA,
     encode_two_hot,
     expect_raw,
     expect_symlog,
@@ -75,4 +76,5 @@ __all__ = [
     "Trainer",
     "AsyncExecutor",
     "StreamManager",
+    "RewardEMA",
 ]
