@@ -45,10 +45,11 @@ class Trainer:
 
         # optimizers
         self.opt_wm = Adam(self.wm.parameters(), lr=1e-4)
-        self.opt_actor = Adam(self.actor.parameters(), lr=4e-4)
-        self.opt_critic = AdamW(
-            self.critic.parameters(), lr=3e-5, weight_decay=1e-4
-        )
+        self.opt_actor = Adam(self.actor.parameters(), lr=3e-5, eps=1e-5)
+        self.opt_critic = Adam(self.critic.parameters(), lr=3e-5, eps=1e-5)
+
+        # scaler
+        self.scaler = torch.GradScaler()
 
         # reward normaliser
         self.reward_ema = RewardEMA(TORCH_DEVICE)
@@ -215,9 +216,6 @@ class Trainer:
         batch_size: int,
         sample_ratio: float,
     ):
-        """Run the training loop for *epochs* iterations."""
-        scaler = torch.GradScaler()
-
         loss_history: list[float] = []
 
         # ------------------------------------------------------------------
@@ -323,7 +321,7 @@ class Trainer:
                 )
 
             ce_img, ce_act = split_cross_entropy(logits, target_tokens)
-            ce = 0.4 * ce_img + 0.6 * ce_act
+            wm_loss = 0.4 * ce_img + 0.6 * ce_act
 
             # LayerNorm in mixed-precision currently upcasts its output to
             # fp32 which causes a dtype mismatch with the fp16-cast model
@@ -336,6 +334,7 @@ class Trainer:
             reward_logits = self.wm.reward_head(
                 hidden_states[:, -1].to(reward_head_dtype)
             )  # (B, |BINS|)
+
             # The replay, environment wrapper and all downstream computations
             # already operate **in symlog space** (see
             # ``clwm.env.atari_envs.wrap_reward_symlog`` and
@@ -411,25 +410,35 @@ class Trainer:
                         ewc_penalty += (F_ * (p - theta_star_).pow(2)).sum()
 
             loss = (
-                ce + actor_loss + critic_loss + loss_reward + lam * ewc_penalty
+                wm_loss
+                + actor_loss
+                + critic_loss
+                + loss_reward
+                + lam * ewc_penalty
             )
+
+            self.scaler.scale(wm_loss).backward()
+            self.scaler.scale(actor_loss).backward()
+            self.scaler.scale(critic_loss).backward()
+
+            # Gradient clipping requires unscaled grads
+            self.scaler.unscale_(self.opt_wm)
+            self.scaler.unscale_(self.opt_actor)
+            self.scaler.unscale_(self.opt_critic)
+
+            torch.nn.utils.clip_grad_norm_(self.wm.parameters(), 1000.0)
+            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 100.0)
+            torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 100.0)
+
+            self.scaler.step(self.opt_wm)
+            self.scaler.step(self.opt_actor)
+            self.scaler.step(self.opt_critic)
 
             self.opt_wm.zero_grad()
             self.opt_actor.zero_grad()
             self.opt_critic.zero_grad()
 
-            scaler.scale(loss).backward()
-
-            # Gradient clipping requires unscaled grads
-            scaler.unscale_(self.opt_wm)
-            scaler.unscale_(self.opt_actor)
-            scaler.unscale_(self.opt_critic)
-            torch.nn.utils.clip_grad_norm_(self.wm.parameters(), 5.0)
-
-            scaler.step(self.opt_wm)
-            scaler.step(self.opt_actor)
-            scaler.step(self.opt_critic)
-            scaler.update()
+            self.scaler.update()
 
             for block in self.wm.blocks:
                 block.tau.mul_(0.90).clamp_(min=0.02)
@@ -438,7 +447,7 @@ class Trainer:
 
             pbar.set_postfix(
                 total_loss=f"{loss.item():.4f}",
-                ce=f"{ce.item():.4f}",
+                wm_loss=f"{wm_loss.item():.4f}",
                 ce_img=f"{ce_img.item():.3f}",
                 ce_act=f"{ce_act.item():.3f}",
                 return_scale=f"{advantage.std().item():.4f}",
@@ -457,7 +466,7 @@ class Trainer:
                 wandb.log(
                     {
                         "train/total_loss": loss.item(),
-                        "train/cross_entropy": ce.item(),
+                        "train/wm_loss": wm_loss.item(),
                         "train/ce_image": ce_img.item(),
                         "train/ce_action": ce_act.item(),
                         "train/advantage": advantage.std().item(),
